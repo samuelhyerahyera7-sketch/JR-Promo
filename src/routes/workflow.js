@@ -121,7 +121,7 @@ const hasUniform = (items) => items.some((i) => i.category === 'Uniform');
 // ---------------------------------------------------------------- requests
 
 const REQUEST_SELECT = `
-  SELECT r.*, c.name AS campaign_name, c.client_id, cl.name AS client_name, c.account_manager_id,
+  SELECT r.*, c.name AS campaign_name, c.colour AS campaign_colour, c.client_id, cl.name AS client_name, c.account_manager_id,
          w.name AS warehouse_name, pr.name AS promoter_name, pr.phone AS promoter_phone,
          pr.uniform_size AS promoter_size, pr.gender AS promoter_gender,
          rb.name AS requested_by_name, ab.name AS approved_by_name, db_.name AS dispatched_by_name
@@ -147,6 +147,8 @@ function loadRequest(db, user, id) {
   request.items = db
     .prepare(
       `SELECT ri.*, p.sku, p.name AS product_name, p.unit, p.category, p.size, p.colour, p.gender, p.barcode,
+         (SELECT sc.colour FROM campaigns sc WHERE sc.id = p.campaign_id) AS shelf_colour,
+         (SELECT sc.name FROM campaigns sc WHERE sc.id = p.campaign_id) AS shelf_campaign,
          COALESCE((SELECT qty FROM stock s WHERE s.product_id = ri.product_id AND s.warehouse_id = ?), 0) AS warehouse_qty,
          (SELECT bin FROM stock s WHERE s.product_id = ri.product_id AND s.warehouse_id = ?) AS bin,
          (SELECT group_concat(batch_no || ' (exp ' || COALESCE(expiry_date, '-') || ')', ', ') FROM movements m
@@ -648,7 +650,7 @@ function counterRoutes(db) {
     );
     const campaigns = db
       .prepare(
-        `SELECT c.id, c.name, c.status, c.start_date, c.end_date, cl.name AS client_name
+        `SELECT c.id, c.name, c.status, c.start_date, c.end_date, c.colour, cl.name AS client_name
          FROM campaigns c JOIN clients cl ON cl.id = c.client_id JOIN campaign_promoters cp ON cp.campaign_id = c.id
          WHERE cp.promoter_id = ? ORDER BY CASE c.status WHEN 'active' THEN 0 WHEN 'planned' THEN 1 ELSE 2 END, c.start_date DESC`,
       )
@@ -660,7 +662,7 @@ function counterRoutes(db) {
       .all(promoterId);
     const holding = db
       .prepare(
-        `SELECT f.product_id, f.campaign_id, f.qty, p.sku, p.name AS product_name, p.category, c.name AS campaign_name, c.status AS campaign_status
+        `SELECT f.product_id, f.campaign_id, f.qty, p.sku, p.name AS product_name, p.category, c.name AS campaign_name, c.status AS campaign_status, c.colour AS campaign_colour
          FROM field_stock f JOIN products p ON p.id = f.product_id JOIN campaigns c ON c.id = f.campaign_id
          WHERE f.promoter_id = ? AND f.qty > 0 ORDER BY c.name, p.category, p.name`,
       )

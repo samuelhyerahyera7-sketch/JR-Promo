@@ -390,6 +390,91 @@ const MIGRATIONS = [
   CREATE INDEX idx_count_lines_status ON count_lines(status);
   `,
   },
+  // v5: campaign shelf colours, gazebo / banner categories, setups & strike downs, setup photos
+  `
+  ALTER TABLE campaigns ADD COLUMN colour TEXT;
+  -- The campaign a product is shelved for, so its shelf can carry that campaign's colour
+  ALTER TABLE products ADD COLUMN campaign_id INTEGER REFERENCES campaigns(id);
+  UPDATE products SET category = 'Gazebo' WHERE lower(name) LIKE '%gazebo%';
+
+  -- A setup job: equipment goes out to a venue, gets built, and is struck down and brought back later
+  CREATE TABLE setups (
+    id INTEGER PRIMARY KEY,
+    ref TEXT NOT NULL UNIQUE,
+    campaign_id INTEGER NOT NULL REFERENCES campaigns(id),
+    warehouse_id INTEGER NOT NULL REFERENCES warehouses(id),
+    venue TEXT NOT NULL,
+    address TEXT,
+    contact TEXT,
+    setup_at TEXT NOT NULL,
+    strike_at TEXT,
+    lead_id INTEGER NOT NULL REFERENCES users(id),
+    status TEXT NOT NULL DEFAULT 'scheduled'
+      CHECK (status IN ('scheduled','loaded','set_up','struck','returned','cancelled')),
+    notes TEXT,
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    loaded_by INTEGER REFERENCES users(id),
+    loaded_at TEXT,
+    set_up_by INTEGER REFERENCES users(id),
+    set_up_at TEXT,
+    set_up_lat REAL,
+    set_up_lng REAL,
+    struck_by INTEGER REFERENCES users(id),
+    struck_at TEXT,
+    struck_lat REAL,
+    struck_lng REAL,
+    returned_by INTEGER REFERENCES users(id),
+    returned_at TEXT
+  );
+  CREATE INDEX idx_setups_dates ON setups(setup_at, strike_at);
+  CREATE TABLE setup_crew (
+    setup_id INTEGER NOT NULL REFERENCES setups(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    PRIMARY KEY (setup_id, user_id)
+  );
+  CREATE TABLE setup_items (
+    id INTEGER PRIMARY KEY,
+    setup_id INTEGER NOT NULL REFERENCES setups(id) ON DELETE CASCADE,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    qty INTEGER NOT NULL CHECK (qty > 0),
+    qty_out INTEGER,
+    qty_good INTEGER,
+    qty_damaged INTEGER,
+    UNIQUE (setup_id, product_id)
+  );
+
+  -- Attachments can now belong to a setup (proof photos); widen the kind list
+  CREATE TABLE attachments_v5 (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('receipt','request','return','setup')),
+    reference TEXT,
+    warehouse_id INTEGER REFERENCES warehouses(id),
+    request_id INTEGER REFERENCES requests(id),
+    return_id INTEGER REFERENCES returns(id),
+    setup_id INTEGER REFERENCES setups(id),
+    caption TEXT,
+    filename TEXT,
+    mime TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    data BLOB NOT NULL,
+    uploaded_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    lat REAL,
+    lng REAL,
+    accuracy REAL
+  );
+  INSERT INTO attachments_v5 (id, kind, reference, warehouse_id, request_id, return_id, caption, filename, mime, size, data,
+                              uploaded_by, created_at, lat, lng, accuracy)
+    SELECT id, kind, reference, warehouse_id, request_id, return_id, caption, filename, mime, size, data,
+           uploaded_by, created_at, lat, lng, accuracy FROM attachments;
+  DROP TABLE attachments;
+  ALTER TABLE attachments_v5 RENAME TO attachments;
+  CREATE INDEX idx_attachments_ref ON attachments(kind, reference);
+
+  -- Count approvals are by units only (no money in the system)
+  DELETE FROM settings WHERE key = 'count_tolerance_value';
+  `,
 ];
 
 function migrate(db) {

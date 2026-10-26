@@ -6,11 +6,14 @@ const v = require('../validate');
 const { tx } = require('../db');
 const { assertCampaign, campaignScope } = require('../access');
 const stock = require('../stock');
+const { CAMPAIGN_COLOURS, COLOUR_KEYS, nextColour } = require('../colours');
 
 const STATUSES = ['planned', 'active', 'completed', 'cancelled'];
 
 function campaignRoutes(db) {
   const r = express.Router();
+
+  r.get('/colours', (req, res) => res.json(CAMPAIGN_COLOURS));
 
   r.get('/', (req, res) => {
     const scope = campaignScope(req.user);
@@ -54,6 +57,17 @@ function campaignRoutes(db) {
       )
       .all(id);
     campaign.summary = campaignSummary(db, id, req.user);
+    // Products shelved under this campaign's colour, with where they sit
+    campaign.shelved =
+      req.user.role === 'promoter'
+        ? []
+        : db
+            .prepare(
+              `SELECT p.id, p.sku, p.name, p.category, w.name AS warehouse_name, s.bin, s.qty
+               FROM products p JOIN stock s ON s.product_id = p.id JOIN warehouses w ON w.id = s.warehouse_id
+               WHERE p.campaign_id = ? AND s.qty > 0 ORDER BY w.name, s.bin, p.name`,
+            )
+            .all(id);
     campaign.plan = req.user.role === 'promoter' ? [] : campaignPlan(db, id);
     res.json(campaign);
   });
@@ -63,6 +77,16 @@ function campaignRoutes(db) {
     const id = v.int(req.params.id, 'id', { required: true });
     const campaign = assertCampaign(db, req.user, id);
     res.json(campaignProducts(db, campaign));
+  });
+
+  // Shelf colour is a warehouse decision too, so the warehouse manager can change it
+  r.put('/:id/colour', allow(MANAGEMENT, 'account_manager', 'warehouse_manager'), (req, res) => {
+    const id = v.int(req.params.id, 'id', { required: true });
+    if (req.user.role === 'warehouse_manager') v.found(db.prepare('SELECT 1 FROM campaigns WHERE id = ?').get(id), 'Campaign');
+    else assertCampaign(db, req.user, id, { manage: true });
+    const colour = v.oneOf(req.body.colour, 'Shelf colour', COLOUR_KEYS, { required: true });
+    db.prepare('UPDATE campaigns SET colour = ? WHERE id = ?').run(colour, id);
+    res.json(db.prepare('SELECT * FROM campaigns WHERE id = ?').get(id));
   });
 
   // Planned stock for the campaign vs what has been approved and sent
@@ -104,6 +128,7 @@ function campaignRoutes(db) {
       end,
       v.oneOf(b.status, 'Status', STATUSES) || 'planned',
       v.str(b.notes, 'Notes', { max: 2000 }),
+      v.oneOf(b.colour, 'Shelf colour', COLOUR_KEYS) || nextColour(db),
     ];
   };
 
@@ -121,8 +146,8 @@ function campaignRoutes(db) {
     const id = tx(db, () => {
       const info = db
         .prepare(
-          `INSERT INTO campaigns (name, client_id, account_manager_id, region, start_date, end_date, status, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO campaigns (name, client_id, account_manager_id, region, start_date, end_date, status, notes, colour)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(...f);
       setPromoters(info.lastInsertRowid, req.body.promoter_ids);
@@ -137,7 +162,7 @@ function campaignRoutes(db) {
     const f = fields(req.body, req.user);
     tx(db, () => {
       db.prepare(
-        `UPDATE campaigns SET name=?, client_id=?, account_manager_id=?, region=?, start_date=?, end_date=?, status=?, notes=?
+        `UPDATE campaigns SET name=?, client_id=?, account_manager_id=?, region=?, start_date=?, end_date=?, status=?, notes=?, colour=?
          WHERE id=?`,
       ).run(...f, id);
       setPromoters(id, req.body.promoter_ids);
@@ -155,7 +180,7 @@ function campaignRoutes(db) {
 function campaignSummary(db, campaignId, user) {
   const rows = db
     .prepare(
-      `SELECT p.id AS product_id, p.sku, p.name AS product_name, p.unit_cost,
+      `SELECT p.id AS product_id, p.sku, p.name AS product_name,
          COALESCE(SUM(CASE WHEN m.type = 'dispatch' THEN m.qty END), 0) AS dispatched,
          COALESCE(SUM(CASE WHEN m.type = 'usage' THEN m.qty END), 0) AS used,
          COALESCE(SUM(CASE WHEN m.type = 'damage' THEN m.qty END), 0) AS damaged,
@@ -167,11 +192,6 @@ function campaignSummary(db, campaignId, user) {
        GROUP BY p.id ORDER BY p.name`,
     )
     .all(...(user.role === 'promoter' ? [campaignId, user.id, campaignId, user.id] : [campaignId, campaignId]));
-  const showCost = user.role !== 'promoter' && user.role !== 'warehouse';
-  for (const row of rows) {
-    if (showCost) row.cost_used = Math.round((row.used + row.damaged) * row.unit_cost * 100) / 100;
-    else delete row.unit_cost;
-  }
   return rows;
 }
 

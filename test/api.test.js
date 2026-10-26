@@ -56,6 +56,7 @@ before(async () => {
     ['manager', 'manager@jrpromo.test'],
     ['warehouse', 'warehouse@jrpromo.test'],
     ['ashwin', 'ashwin@jrpromo.test'],
+    ['liam', 'liam@jrpromo.test'],
     ['nomsa', 'promoter@jrpromo.test'],
     ['kagiso', 'kagiso@jrpromo.test'],
   ]) {
@@ -91,10 +92,14 @@ test('role permissions', async () => {
   assert.ok(amProducts.length > 0);
   assert.ok(amProducts.every((p) => ['Ubuntu Mobile', 'Protea Skincare', 'JR Promotions (company stock)'].includes(p.client_name)));
 
-  // Warehouse sees stock but not money
-  const whDash = (await call('warehouse', 'GET', '/dashboard')).data;
-  assert.equal(whDash.kpis.stock_value, undefined);
-  assert.ok((await call('director', 'GET', '/dashboard')).data.kpis.stock_value > 0);
+  // No money anywhere: dashboards, clients and warehouses report units only
+  for (const who of ['warehouse', 'director', 'lerato']) {
+    const kpis = (await call(who, 'GET', '/dashboard')).data.kpis;
+    assert.equal(kpis.stock_value, undefined);
+    assert.equal(kpis.field_value, undefined);
+  }
+  assert.ok((await call('director', 'GET', '/clients')).data.every((c) => !('stock_value' in c)));
+  assert.ok((await call('director', 'GET', '/warehouses')).data.every((w) => !('value' in w)));
 });
 
 test('promoters only see their own requests and campaigns', async () => {
@@ -531,9 +536,6 @@ test('warehouse manager role: runs the floor, manages floor staff, nothing above
   const team = (await call('manager', 'GET', '/users')).data;
   assert.ok(team.every((u) => ['warehouse_manager', 'warehouse', 'promoter'].includes(u.role)));
 
-  // Sees Rand values, which floor staff don't
-  assert.ok((await call('manager', 'GET', '/dashboard')).data.kpis.stock_value > 0);
-  assert.equal((await call('warehouse', 'GET', '/dashboard')).data.kpis.stock_value, undefined);
   // Can dispatch like the floor staff
   assert.ok(Array.isArray((await call('manager', 'GET', '/dashboard')).data.queue));
 });
@@ -544,7 +546,7 @@ test('blind stock counts: hidden figures, tolerance, manager approval, no self-a
   const managerId = id("SELECT id FROM users WHERE email = 'manager@jrpromo.test'");
   const sku = (s) => id('SELECT id FROM products WHERE sku = ?', s);
   const [cooler, flag, gazebo] = [sku('JR-EQP-COOL'), sku('JR-SET-FLAG'), sku('JR-SET-GAZ')];
-  await call('manager', 'PUT', '/counts/settings', { tolerance_units: 2, tolerance_value: 1000 });
+  await call('manager', 'PUT', '/counts/settings', { tolerance_units: 2 });
 
   const created = await call('manager', 'POST', '/counts', { warehouse_id: jhb, assigned_to: sipho, product_ids: [cooler, flag, gazebo] });
   assert.equal(created.status, 201, JSON.stringify(created.data));
@@ -565,7 +567,7 @@ test('blind stock counts: hidden figures, tolerance, manager approval, no self-a
   await call('warehouse', 'PUT', `/counts/${cnt.id}/lines`, {
     lines: [
       { id: line(flag), counted_qty: before.flag - 1 }, // small: auto-adjusted
-      { id: line(gazebo), counted_qty: before.gazebo - 2 }, // R7 600 missing: needs approval
+      { id: line(gazebo), counted_qty: before.gazebo - 3 }, // more than 2 units out: needs approval
     ],
   });
   const submitted = (await call('warehouse', 'POST', `/counts/${cnt.id}/submit`)).data;
@@ -573,7 +575,7 @@ test('blind stock counts: hidden figures, tolerance, manager approval, no self-a
   assert.equal(st(cooler).status, 'matched');
   assert.equal(st(flag).status, 'auto');
   assert.equal(st(gazebo).status, 'pending');
-  assert.equal(st(gazebo).variance, -2);
+  assert.equal(st(gazebo).variance, -3);
   assert.equal(qty('JR-SET-FLAG', 'JHB Main'), before.flag - 1, 'auto-adjusted');
   assert.equal(qty('JR-SET-GAZ', 'JHB Main'), before.gazebo, 'big difference waits for approval');
   assert.equal(submitted.status, 'submitted');
@@ -585,7 +587,7 @@ test('blind stock counts: hidden figures, tolerance, manager approval, no self-a
   assert.equal((await call('manager', 'POST', `/counts/${cnt.id}/decide`, { decisions: [{ line_id: st(gazebo).id, approve: false }] })).status, 400);
   const decided = (await call('manager', 'POST', `/counts/${cnt.id}/decide`, { decisions: [{ line_id: st(gazebo).id, approve: true }] })).data;
   assert.equal(decided.status, 'closed');
-  assert.equal(qty('JR-SET-GAZ', 'JHB Main'), before.gazebo - 2);
+  assert.equal(qty('JR-SET-GAZ', 'JHB Main'), before.gazebo - 3);
   const adj = db.prepare("SELECT note, user_id FROM movements WHERE reference = ? AND product_id = ?").get(cnt.ref, gazebo);
   assert.match(adj.note, /Counted by Sipho Nkosi, approved by Bongani Mthembu/);
   assert.equal(adj.user_id, managerId);
@@ -601,8 +603,9 @@ test('blind stock counts: hidden figures, tolerance, manager approval, no self-a
   // Shrinkage report shows the approved loss against Sipho's counting
   const report = (await call('manager', 'GET', '/reports/shrinkage')).data;
   const gz = report.by_product.find((p) => p.sku === 'JR-SET-GAZ');
-  assert.ok(gz.missing >= 2);
-  assert.ok(report.totals.missing_value >= 7600);
+  assert.ok(gz.missing >= 3);
+  assert.ok(report.totals.missing >= 3);
+  assert.ok(!JSON.stringify(report).includes('value'), 'shrinkage is reported in units only');
   const siphoRow = report.by_counter.find((r) => r.name === 'Sipho Nkosi');
   assert.ok(siphoRow.differences >= 2);
   assert.equal((await call('warehouse', 'GET', '/reports/shrinkage')).status, 403);
@@ -630,6 +633,103 @@ test('cycle counts pick the longest-uncounted stock and support recounts', async
   assert.equal(re.status, 201, JSON.stringify(re.data));
   assert.equal(re.data.items[0].product_id, pending[0].product_id);
   assert.equal((await call('manager', 'GET', `/counts/${cyc.data.id}`)).data.status, 'closed');
+});
+
+test('campaign shelf colours and product shelf tags', async () => {
+  const colours = (await call('warehouse', 'GET', '/campaigns/colours')).data;
+  assert.ok(colours.length >= 10 && colours.every((c) => c.key && c.name && /^#[0-9a-f]{6}$/i.test(c.hex)));
+
+  const juice = id("SELECT id FROM clients WHERE name = 'Sunfresh Juices'");
+  // A new campaign with no colour gets the least-used one; an unknown colour is refused
+  const auto = await call('lerato', 'POST', '/campaigns', { name: 'Colour test', client_id: juice });
+  assert.equal(auto.status, 201, JSON.stringify(auto.data));
+  const used = db.prepare("SELECT colour FROM campaigns WHERE status IN ('planned','active') AND id != ?").all(auto.data.id).map((r) => r.colour);
+  assert.ok(colours.map((c) => c.key).includes(auto.data.colour));
+  assert.ok(!used.includes(auto.data.colour), 'picked a colour no running campaign uses');
+  assert.equal((await call('lerato', 'POST', '/campaigns', { name: 'Bad', client_id: juice, colour: 'tartan' })).status, 400);
+
+  // Receiving for a campaign tags the products with its shelf colour
+  const jhb = id("SELECT id FROM warehouses WHERE name = 'JHB Main'");
+  const pullup = id("SELECT id FROM products WHERE sku = 'SFJ-PUB-85'");
+  const rec = await call('warehouse', 'POST', '/stock/receive', { warehouse_id: jhb, reference: 'GRN-COL-1', campaign_id: auto.data.id, items: [{ product_id: pullup, qty: 1 }] });
+  assert.equal(rec.status, 201, JSON.stringify(rec.data));
+  const product = (await call('warehouse', 'GET', `/products/${pullup}`)).data;
+  assert.equal(product.shelf_colour, auto.data.colour);
+  assert.equal(product.shelf_campaign, 'Colour test');
+  const filtered = (await call('warehouse', 'GET', `/products?campaign_id=${auto.data.id}`)).data;
+  assert.deepEqual(filtered.map((p) => p.sku), ['SFJ-PUB-85']);
+  assert.ok((await call('lerato', 'GET', `/campaigns/${auto.data.id}`)).data.shelved.some((x) => x.sku === 'SFJ-PUB-85'));
+
+  // Another client's campaign can't be used as a shelf tag
+  const mobile = id("SELECT id FROM campaigns WHERE name = 'Ubuntu Mobile Taxi Rank Drive'");
+  assert.equal((await call('warehouse', 'POST', '/stock/receive', { warehouse_id: jhb, reference: 'GRN-COL-2', campaign_id: mobile, items: [{ product_id: pullup, qty: 1 }] })).status, 400);
+
+  // Request lines carry the shelf colour for pickers; campaign signs scan
+  assert.equal((await call('warehouse', 'GET', `/scan?code=JRC:${auto.data.id}`)).data.kind, 'campaign');
+  const cats = (await call('warehouse', 'GET', '/products/categories')).data;
+  for (const c of ['Gazebo', 'Backwall Banner', 'Pull-up Banner']) assert.ok(cats.includes(c));
+});
+
+test('setups: book, load out, set up, strike down, check back in', async () => {
+  const campaign = id("SELECT id FROM campaigns WHERE name = 'Protea Mall Sampling'");
+  const cpt = id("SELECT id FROM warehouses WHERE name = 'Cape Town'");
+  const liam = id("SELECT id FROM users WHERE email = 'liam@jrpromo.test'");
+  const charlene = id("SELECT id FROM users WHERE email = 'charlene@jrpromo.test'");
+  const sku = (s) => id('SELECT id FROM products WHERE sku = ?', s);
+  const [table, pullup, gazebo] = [sku('JR-TBL-FOLD'), sku('PRS-PUB-85'), sku('JR-SET-GAZ')];
+  const day = (n) => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10);
+  const body = {
+    campaign_id: campaign, warehouse_id: cpt, venue: 'Canal Walk centre court', address: 'Century City', setup_at: `${day(1)}T07:00`,
+    strike_at: `${day(2)}T18:00`, lead_id: liam, crew_ids: [charlene], items: [{ product_id: table, qty: 1 }, { product_id: pullup, qty: 2 }, { product_id: gazebo, qty: 5 }],
+  };
+
+  // Strike can't be before setup; only planners can book; other clients' products refused
+  assert.equal((await call('pieter', 'POST', '/setups', { ...body, strike_at: `${day(0)}T06:00` })).status, 400);
+  assert.equal((await call('warehouse', 'POST', '/setups', body)).status, 403);
+  assert.equal((await call('pieter', 'POST', '/setups', { ...body, items: [{ product_id: sku('SFJ-PUB-85'), qty: 1 }] })).status, 400);
+  assert.equal((await call('lerato', 'POST', '/setups', body)).status, 404, 'not her campaign');
+
+  const created = await call('pieter', 'POST', '/setups', body);
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  const s = created.data;
+  assert.equal(s.status, 'scheduled');
+  assert.equal(s.crew[0].name, 'Charlene Adams');
+  // Crew lead sees it; another promoter doesn't
+  assert.equal((await call('nomsa', 'GET', `/setups/${s.id}`)).status, 404);
+
+  const before = { table: qty('JR-TBL-FOLD', 'Cape Town'), pullup: qty('PRS-PUB-85', 'Cape Town') };
+  // Reminder to load out (setup is tomorrow)
+  assert.ok((await call('warehouse', 'GET', '/reminders')).data.some((r) => r.type === 'setup_load' && r.title.includes(s.ref)));
+
+  const loaded = await call('warehouse', 'POST', `/setups/${s.id}/load`);
+  assert.equal(loaded.status, 409, 'Cape Town only has 2 JR gazebos, so loading is refused');
+  assert.equal(qty('JR-TBL-FOLD', 'Cape Town'), before.table, 'nothing moved');
+  // Fix the equipment list and load again
+  const edited = await call('pieter', 'PUT', `/setups/${s.id}`, { ...body, items: [{ product_id: table, qty: 1 }, { product_id: pullup, qty: 2 }] });
+  assert.equal(edited.status, 200, JSON.stringify(edited.data));
+  const out = (await call('manager', 'POST', `/setups/${s.id}/load`)).data;
+  assert.equal(out.status, 'loaded');
+  assert.equal(qty('PRS-PUB-85', 'Cape Town'), before.pullup - 2);
+  const held = db.prepare('SELECT qty FROM field_stock WHERE product_id = ? AND promoter_id = ? AND campaign_id = ?').get(pullup, liam, campaign);
+  assert.equal(held.qty, 2, 'held against the crew lead');
+  assert.equal((await call('pieter', 'PUT', `/setups/${s.id}`, body)).status, 409, 'locked once loaded');
+
+  const site = { lat: -33.8935, lng: 18.5115, accuracy: 10 };
+  const up = (await call('liam', 'POST', `/setups/${s.id}/set-up`, { location: site })).data;
+  assert.equal(up.status, 'set_up');
+  assert.equal(up.set_up_lat, site.lat);
+  const jpeg = `data:image/jpeg;base64,${Buffer.from('setup-photo').toString('base64')}`;
+  assert.equal((await call('liam', 'POST', '/attachments', { kind: 'setup', setup_id: s.id, data: jpeg, location: site })).status, 201);
+  assert.equal((await call('nomsa', 'POST', '/attachments', { kind: 'setup', setup_id: s.id, data: jpeg })).status, 404);
+
+  assert.equal((await call('liam', 'POST', `/setups/${s.id}/strike`, { location: site })).data.status, 'struck');
+  assert.equal((await call('liam', 'POST', `/setups/${s.id}/return`, {})).status, 403, 'only the warehouse checks equipment in');
+  const pullLine = out.items.find((i) => i.product_id === pullup);
+  const back = (await call('warehouse', 'POST', `/setups/${s.id}/return`, { items: [{ id: pullLine.id, qty_good: 1, qty_damaged: 1 }] })).data;
+  assert.equal(back.status, 'returned');
+  assert.equal(qty('PRS-PUB-85', 'Cape Town'), before.pullup - 1);
+  assert.equal(qty('JR-TBL-FOLD', 'Cape Town'), before.table, 'table came back by default');
+  assert.equal(back.attachments.length, 1);
 });
 
 // Runs last so it checks the ledger after every other test has moved stock

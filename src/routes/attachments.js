@@ -31,6 +31,18 @@ function attachmentRoutes(db) {
       return;
     }
     if (isManagement(user) || isWarehouse(user)) return;
+    if (a.kind === 'setup') {
+      // Setup photos: the crew (to prove the build) and the campaign's account manager
+      const row = db
+        .prepare(
+          `SELECT st.lead_id, c.account_manager_id,
+             EXISTS (SELECT 1 FROM setup_crew sc WHERE sc.setup_id = st.id AND sc.user_id = ?) AS on_crew
+           FROM setups st JOIN campaigns c ON c.id = st.campaign_id WHERE st.id = ?`,
+        )
+        .get(user.id, a.setup_id);
+      if (!row || !(row.lead_id === user.id || row.on_crew || row.account_manager_id === user.id)) throw new HttpError(404, 'Not found');
+      return;
+    }
     const table = a.kind === 'request' ? 'requests' : 'returns';
     const id = a.kind === 'request' ? a.request_id : a.return_id;
     const row = db
@@ -43,13 +55,14 @@ function attachmentRoutes(db) {
 
   r.post('/', (req, res) => {
     const b = req.body;
-    const kind = v.oneOf(b.kind, 'Kind', ['receipt', 'request', 'return'], { required: true });
+    const kind = v.oneOf(b.kind, 'Kind', ['receipt', 'request', 'return', 'setup'], { required: true });
     const a = {
       kind,
       reference: kind === 'receipt' ? v.str(b.reference, 'Delivery reference', { required: true, max: 80 }) : null,
       warehouse_id: kind === 'receipt' ? v.int(b.warehouse_id, 'Warehouse', { required: true }) : null,
       request_id: kind === 'request' ? v.int(b.request_id, 'Request', { required: true }) : null,
       return_id: kind === 'return' ? v.int(b.return_id, 'Return', { required: true }) : null,
+      setup_id: kind === 'setup' ? v.int(b.setup_id, 'Setup', { required: true }) : null,
     };
     assertParent(req.user, a, { write: true });
     const match = /^data:([\w/+.-]+);base64,(.+)$/s.exec(String(b.data || ''));
@@ -61,9 +74,9 @@ function attachmentRoutes(db) {
     const location = v.geo(b.location);
     const info = db
       .prepare(
-        `INSERT INTO attachments (kind, reference, warehouse_id, request_id, return_id, caption, filename, mime, size, data, uploaded_by,
-           lat, lng, accuracy)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO attachments (kind, reference, warehouse_id, request_id, return_id, setup_id, caption, filename, mime, size, data,
+           uploaded_by, lat, lng, accuracy)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         a.kind,
@@ -71,6 +84,7 @@ function attachmentRoutes(db) {
         a.warehouse_id,
         a.request_id,
         a.return_id,
+        a.setup_id,
         v.str(b.caption, 'Caption', { max: 200 }),
         v.str(b.filename, 'File name', { max: 200 }),
         mime,
@@ -85,17 +99,18 @@ function attachmentRoutes(db) {
   });
 
   r.get('/', (req, res) => {
-    const kind = v.oneOf(req.query.kind, 'Kind', ['receipt', 'request', 'return'], { required: true });
+    const kind = v.oneOf(req.query.kind, 'Kind', ['receipt', 'request', 'return', 'setup'], { required: true });
     const a = {
       kind,
       reference: req.query.reference,
       warehouse_id: Number(req.query.warehouse_id),
       request_id: Number(req.query.request_id),
       return_id: Number(req.query.return_id),
+      setup_id: Number(req.query.setup_id),
     };
     assertParent(req.user, a);
-    const where = { receipt: 'a.reference = ? AND a.warehouse_id = ?', request: 'a.request_id = ?', return: 'a.return_id = ?' }[kind];
-    const params = { receipt: [a.reference, a.warehouse_id], request: [a.request_id], return: [a.return_id] }[kind];
+    const where = { receipt: 'a.reference = ? AND a.warehouse_id = ?', request: 'a.request_id = ?', return: 'a.return_id = ?', setup: 'a.setup_id = ?' }[kind];
+    const params = { receipt: [a.reference, a.warehouse_id], request: [a.request_id], return: [a.return_id], setup: [a.setup_id] }[kind];
     res.json(
       db
         .prepare(
@@ -155,7 +170,7 @@ function deliveryRoutes(db) {
       db
         .prepare(
           `SELECT m.reference, m.to_warehouse_id AS warehouse_id, w.name AS warehouse_name, MIN(m.created_at) AS received_at,
-             COUNT(*) AS lines, SUM(m.qty) AS units, SUM(m.qty * p.unit_cost) AS value,
+             COUNT(*) AS lines, SUM(m.qty) AS units,
              group_concat(DISTINCT cl.name) AS clients, MAX(m.note) AS note, MAX(u.name) AS received_by,
              (SELECT COUNT(*) FROM attachments a WHERE a.kind = 'receipt' AND a.reference = m.reference
                 AND a.warehouse_id = m.to_warehouse_id) AS photos
@@ -174,7 +189,7 @@ function deliveryRoutes(db) {
     const scope = clientScope(req.user);
     const lines = db
       .prepare(
-        `SELECT m.id, m.qty, m.batch_no, m.expiry_date, m.note, m.created_at, p.sku, p.name AS product_name, p.unit_cost,
+        `SELECT m.id, m.qty, m.batch_no, m.expiry_date, m.note, m.created_at, p.sku, p.name AS product_name,
            cl.name AS client_name, u.name AS received_by
          FROM movements m JOIN products p ON p.id = m.product_id JOIN clients cl ON cl.id = p.client_id JOIN users u ON u.id = m.user_id
          WHERE m.type = 'receipt' AND m.reference = ? AND m.to_warehouse_id = ? AND ${scope.sql} ORDER BY p.name`,

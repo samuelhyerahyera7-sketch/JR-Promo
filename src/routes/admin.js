@@ -187,9 +187,7 @@ function warehouseRoutes(db) {
       db
         .prepare(
           `SELECT w.*,
-             COALESCE((SELECT SUM(s.qty) FROM stock s WHERE s.warehouse_id = w.id), 0) AS units,
-             COALESCE((SELECT SUM(s.qty * p.unit_cost) FROM stock s JOIN products p ON p.id = s.product_id
-                       WHERE s.warehouse_id = w.id), 0) AS value
+             COALESCE((SELECT SUM(s.qty) FROM stock s WHERE s.warehouse_id = w.id), 0) AS units
            FROM warehouses w ORDER BY w.active DESC, w.name`,
         )
         .all(),
@@ -232,8 +230,8 @@ function clientRoutes(db) {
           `SELECT cl.*, u.name AS account_manager_name,
              (SELECT COUNT(*) FROM products p WHERE p.client_id = cl.id AND p.active = 1) AS product_count,
              (SELECT COUNT(*) FROM campaigns c WHERE c.client_id = cl.id AND c.status = 'active') AS active_campaigns,
-             COALESCE((SELECT SUM(s.qty * p.unit_cost) FROM stock s JOIN products p ON p.id = s.product_id
-                       WHERE p.client_id = cl.id), 0) AS stock_value
+             COALESCE((SELECT SUM(s.qty) FROM stock s JOIN products p ON p.id = s.product_id
+                       WHERE p.client_id = cl.id), 0) AS units
            FROM clients cl LEFT JOIN users u ON u.id = cl.account_manager_id
            WHERE ${scope.sql} ORDER BY cl.is_house DESC, cl.active DESC, cl.name`,
         )

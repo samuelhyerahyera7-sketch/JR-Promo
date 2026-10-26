@@ -6,11 +6,11 @@ A web-based warehouse and logistics system for JR Promotions (South Africa). It 
 
 | Role | What they see and do |
 |---|---|
-| **Director** | Everything: stock value in Rand, all warehouses, clients and campaigns. Manages staff accounts. |
+| **Director** | Everything: all warehouses, clients and campaigns. Manages staff accounts. |
 | **Office staff** | Same as directors, except managing staff accounts. |
-| **Account manager** | Their own clients only. Creates campaigns, assigns promoters, approves (or trims, or rejects) promoter stock requests, and tracks campaign stock usage and cost. |
-| **Warehouse manager** | Everything warehouse staff can do, plus: adds and edits products and uniform ranges, manages their own team (warehouse staff and promoter accounts, badges), sets up and approves stock counts, writes off expired stock, sees stock values and the shrinkage report. Can't create directors, office staff or account managers, or approve their own counts. |
-| **Warehouse staff** | Receives deliveries (with waybill photos and expiry dates), runs the **promoter counter** (scan a promoter's badge, issue stock, take returns, all signed on screen), works the dispatch queue, sends uniforms to the laundry, transfers between warehouses, does stock takes, prints QR labels. Sees quantities but not Rand values. |
+| **Account manager** | Their own clients only. Creates campaigns, assigns promoters, approves (or trims, or rejects) promoter stock requests, and tracks campaign stock usage. |
+| **Warehouse manager** | Everything warehouse staff can do, plus: adds and edits products and uniform ranges, manages their own team (warehouse staff and promoter accounts, badges), sets up and approves stock counts, writes off expired stock, sees the shrinkage report. Can't create directors, office staff or account managers, or approve their own counts. |
+| **Warehouse staff** | Receives deliveries (with waybill photos and expiry dates), runs the **promoter counter** (scan a promoter's badge, issue stock, take returns, all signed on screen), works the dispatch queue, sends uniforms to the laundry, transfers between warehouses, does stock takes, prints QR labels. |
 | **Promoter** | Phone-friendly. Shows their QR ID badge at the counter, requests stock (or whole kits), signs for deliveries, logs what they handed out at each store, and returns leftovers. |
 
 ## The stock flow
@@ -32,6 +32,17 @@ Client delivery ──receive──▶ Warehouse ──dispatch──▶ Promote
 Every stock change is written to an **immutable ledger** (`movements`), so on-hand figures can always be traced back. Each campaign shows a reconciliation: *dispatched = used + damaged + returned + still with promoters*.
 
 ## Features
+
+### Campaign colours on the shelves
+- Every campaign has a **named shelf colour** (red, orange, yellow, lime, green, teal, sky blue, blue, purple, pink, brown, grey). New campaigns get the least-used colour automatically. Account managers, office staff and warehouse managers can change it.
+- Products are **tagged to the campaign they're shelved for**, either on the product screen or by choosing the campaign when receiving stock. The colour then shows on the stock list (with a filter per campaign), product details, picking slips (each line shows its shelf colour and bin), the dispatch queue, the counter, setups and requests.
+- **QR labels & shelf signs**: product labels carry a coloured band with the campaign name, and each campaign has a printable full-width **shelf sign** in its colour, with a QR that opens the campaign.
+
+### Setups & strike downs
+- Book where **gazebos, backwall banners, pull-up banners, tables** and other setup kit need to be built and taken down: campaign, venue and address (with directions), on-site contact, setup and strike-down times, crew lead and crew, and the equipment list (kits can be added in one click).
+- An **agenda** shows every setup and strike down by day (Overdue, Today, Tomorrow…), colour-coded by campaign.
+- Each job goes **Scheduled → Loaded out → Set up → Struck down → Back in warehouse**. Loading out moves the equipment from the warehouse to the crew lead; the crew confirm the setup and strike down on their phones (geotagged, with photos); the warehouse checks everything back in, good or damaged. Anything missing stays against the crew lead.
+- Reminders for setups to load out, strike downs due or overdue, setups not confirmed, and equipment not back after a strike down.
 
 ### Promoter counter and handovers
 - Every promoter has a **QR ID badge** (printable, and on their phone under *My ID badge*). Warehouse staff scan it at the counter to bring up who the promoter is, their uniform size, what's ready to collect, what they hold and what they owe back.
@@ -68,8 +79,8 @@ Worked out live and cleared automatically once dealt with:
 - **Blind counts:** whoever counts never sees the system quantity. They enter what's physically on the shelf (or scan items, one scan per unit) and submit.
 - On submit the system compares. Exact matches close straight away. **Small differences** within the tolerance you set (e.g. up to 2 units *and* up to R200) are adjusted automatically. **Anything bigger waits for a manager**, and stock isn't changed until then.
 - Managers **approve** (stock is adjusted, the ledger records who counted and who approved), **reject** with a reason, or **send for recount** by someone else. **Nobody can approve a count they did themselves** (directors excepted).
-- **Daily cycle counts:** one click picks the products counted longest ago (never-counted first, then highest value), in bin order, for a chosen staff member. Reminders flag stock not counted in 90 days.
-- **Shrinkage report:** missing, found, damaged and expired stock in Rand, by warehouse and product, plus each person's counting accuracy.
+- **Daily cycle counts:** one click picks the products counted longest ago (never-counted first, then the most units), in bin order, for a chosen staff member. Reminders flag stock not counted in 90 days.
+- **Shrinkage report:** missing, found, damaged and expired units, by warehouse and product, plus each person's counting accuracy.
 - Direct stock corrections without a count are manager-only and need a reason.
 
 ### Geotags
@@ -77,15 +88,18 @@ Worked out live and cleared automatically once dealt with:
 - Forms show whether the location was captured. If the phone's location is off or not allowed, the action still goes through, but the activation report is marked *No location* and the account manager gets a reminder.
 - Activation reports are only geotagged when promoters log them on their own phone, so office entries don't show the office's location.
 
+### No money
+The system works in **units only**. No Rand values, stock valuations or costs are shown anywhere, and the stock-count tolerance is set in units.
+
 ### Everything else
 
-- Dashboards for each role: stock value, low-stock alerts, approval and dispatch queues, a 30-day stock flow chart, and stock by warehouse and by client
+- Dashboards for each role: units on hand and with promoters, low-stock alerts, approval and dispatch queues, a 30-day stock flow chart, and stock by warehouse and by client
 - Multi-warehouse stock with bin locations (seeded with Midrand, Montague Gardens and Pinetown)
 - Reorder levels and low-stock highlighting
 - Stock takes that post count variances as adjustments
 - A view of stock still with promoters, flagging stock on campaigns that have already ended
 - CSV exports of stock levels and the ledger (opens in Excel; guarded against formula injection)
-- Rand (ZAR) valuation, SA provinces, en-ZA formatting
+- SA provinces and en-ZA formatting
 - Works on phones (promoters) and desktops (office and warehouse)
 
 ## Running it
@@ -151,6 +165,7 @@ src/
   db.js             schema, upgrades for older databases, transaction helper
   auth.js           password hashing, sessions, role checks
   access.js         row-level rules (who can see which campaign)
+  colours.js        campaign shelf colours
   stock.js          all stock changes and ledger writes go through here (batches, laundry, write-offs)
   routes/
     admin.js        login, users, warehouses, clients
@@ -160,6 +175,7 @@ src/
     attachments.js  waybill / delivery photos, deliveries list
     reminders.js    live reminders
     counts.js       blind stock counts, approvals, cycle counts, shrinkage report
+    setups.js       setups & strike downs
     misc.js         QR codes, scan lookup, kits
     dashboard.js    role dashboards
   seed.js           demo data

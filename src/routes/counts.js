@@ -11,8 +11,8 @@ const { tx } = require('../db');
  *
  *  1. A count lists products in one warehouse and is assigned to one person.
  *  2. They count blind: the system quantity is never shown while the count is open.
- *  3. On submit the system compares. Differences within the tolerance are adjusted
- *     straight away; bigger ones wait for a manager.
+ *  3. On submit the system compares. Differences within the unit tolerance are
+ *     adjusted straight away; bigger ones wait for a manager.
  *  4. A manager approves (stock is adjusted) or rejects / asks for a recount.
  *     Nobody can approve a count they did themselves, except a director.
  */
@@ -22,7 +22,7 @@ const COUNTERS = [MANAGEMENT, WAREHOUSE];
 function getSettings(db) {
   const rows = db.prepare("SELECT key, value FROM settings WHERE key LIKE 'count_%'").all();
   const map = Object.fromEntries(rows.map((r) => [r.key, Number(r.value)]));
-  return { tolerance_units: map.count_tolerance_units ?? 0, tolerance_value: map.count_tolerance_value ?? 0 };
+  return { tolerance_units: map.count_tolerance_units ?? 0 };
 }
 
 function nextRef(db) {
@@ -36,8 +36,8 @@ const COUNT_SELECT = `
     (SELECT COUNT(*) FROM count_lines l WHERE l.count_id = sc.id AND l.counted_qty IS NOT NULL) AS counted_lines,
     (SELECT COUNT(*) FROM count_lines l WHERE l.count_id = sc.id AND l.status = 'pending') AS pending_lines,
     (SELECT COUNT(*) FROM count_lines l WHERE l.count_id = sc.id AND l.variance != 0) AS variance_lines,
-    (SELECT COALESCE(SUM(l.variance * l.unit_cost), 0) FROM count_lines l WHERE l.count_id = sc.id
-       AND l.status IN ('auto','approved')) AS adjusted_value
+    (SELECT COALESCE(SUM(l.variance), 0) FROM count_lines l WHERE l.count_id = sc.id
+       AND l.status IN ('auto','approved')) AS adjusted_units
   FROM stock_counts sc
   JOIN warehouses w ON w.id = sc.warehouse_id
   JOIN users a ON a.id = sc.assigned_to
@@ -66,7 +66,7 @@ function loadCount(db, user, id) {
         delete l.system_qty;
         delete l.variance;
       }
-      if (!approver) delete l.unit_cost;
+      delete l.unit_cost;
       return l;
     });
   count.can_count = count.status === 'open' && (count.assigned_to === user.id || approver);
@@ -123,12 +123,10 @@ function countRoutes(db) {
 
   r.put('/settings', allow(STOCK_APPROVERS), (req, res) => {
     const units = v.int(req.body.tolerance_units, 'Unit tolerance', { required: true, min: 0, max: 100000 });
-    const value = v.num(req.body.tolerance_value, 'Rand tolerance', { required: true, min: 0 });
-    const upsert = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value');
-    tx(db, () => {
-      upsert.run('count_tolerance_units', String(units));
-      upsert.run('count_tolerance_value', String(value));
-    });
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value').run(
+      'count_tolerance_units',
+      String(units),
+    );
     res.json(getSettings(db));
   });
 
@@ -151,7 +149,6 @@ function countRoutes(db) {
          ORDER BY CASE sc.status WHEN 'submitted' THEN 0 WHEN 'open' THEN 1 ELSE 2 END, sc.id DESC LIMIT 300`,
       )
       .all(...params);
-    if (!isStockApprover(req.user)) for (const row of rows) delete row.adjusted_value;
     res.json(rows);
   });
 
@@ -210,7 +207,7 @@ function countRoutes(db) {
 
   /**
    * Daily cycle count: the products in a warehouse that were counted longest ago
-   * (never-counted first, then highest stock value), so the whole warehouse gets
+   * (never-counted first, then the most units on the shelf), so the whole warehouse gets
    * counted regularly without a shutdown.
    */
   r.post('/cycle', allow(STOCK_APPROVERS), (req, res) => {
@@ -227,7 +224,7 @@ function countRoutes(db) {
          WHERE s.warehouse_id = ? AND p.active = 1 AND s.qty > 0
            AND NOT EXISTS (SELECT 1 FROM count_lines l JOIN stock_counts sc ON sc.id = l.count_id
                            WHERE sc.status = 'open' AND sc.warehouse_id = s.warehouse_id AND l.product_id = p.id)
-         ORDER BY last_counted IS NOT NULL, last_counted, s.qty * p.unit_cost DESC
+         ORDER BY last_counted IS NOT NULL, last_counted, s.qty DESC
          LIMIT ?`,
       )
       .all(warehouseId, size)
@@ -259,7 +256,7 @@ function countRoutes(db) {
     if (!count.can_count) throw new HttpError(409, `${count.ref} can't be submitted now`);
     const missing = count.items.filter((l) => l.counted_qty === null);
     if (missing.length) throw new HttpError(400, `Count every line first (${missing.length} left). Enter 0 if there are none.`);
-    const { tolerance_units: tolUnits, tolerance_value: tolValue } = getSettings(db);
+    const { tolerance_units: tolUnits } = getSettings(db);
     tx(db, () => {
       const now = new Date().toISOString();
       db.prepare("UPDATE stock_counts SET status = 'submitted', submitted_at = ? WHERE id = ?").run(now, count.id);
@@ -267,7 +264,7 @@ function countRoutes(db) {
       for (const l of db.prepare('SELECT l.*, p.unit_cost FROM count_lines l JOIN products p ON p.id = l.product_id WHERE l.count_id = ?').all(count.id)) {
         const system = stock.warehouseQty(db, l.product_id, count.warehouse_id);
         const variance = l.counted_qty - system;
-        const withinTolerance = Math.abs(variance) <= tolUnits && Math.abs(variance * l.unit_cost) <= tolValue;
+        const withinTolerance = Math.abs(variance) <= tolUnits;
         const status = variance === 0 ? 'matched' : withinTolerance ? 'auto' : 'pending';
         db.prepare('UPDATE count_lines SET system_qty = ?, variance = ?, unit_cost = ?, status = ?, decided_at = ? WHERE id = ?').run(
           system,
@@ -370,30 +367,30 @@ function reportRoutes(db) {
     const whMove = wh ? 'AND COALESCE(m.to_warehouse_id, m.from_warehouse_id) = ?' : '';
     const whParams = wh ? [wh] : [];
 
-    // Ledger losses/gains valued at today's unit cost
+    // Ledger losses and gains, in units
     const byProduct = db
       .prepare(
-        `SELECT p.id, p.sku, p.name, cl.name AS client_name, p.unit_cost,
+        `SELECT p.id, p.sku, p.name, cl.name AS client_name,
            COALESCE(SUM(CASE WHEN m.type = 'adjustment' AND m.qty < 0 THEN -m.qty END), 0) AS missing,
            COALESCE(SUM(CASE WHEN m.type = 'adjustment' AND m.qty > 0 THEN m.qty END), 0) AS found,
            COALESCE(SUM(CASE WHEN m.type = 'damage' THEN m.qty END), 0) AS damaged,
            COALESCE(SUM(CASE WHEN m.type = 'write_off' THEN m.qty END), 0) AS expired
          FROM movements m JOIN products p ON p.id = m.product_id JOIN clients cl ON cl.id = p.client_id
          WHERE m.type IN ('adjustment','damage','write_off') AND m.created_at BETWEEN ? AND ? ${whMove}
-         GROUP BY p.id ORDER BY (missing + damaged + expired - found) * p.unit_cost DESC`,
+         GROUP BY p.id ORDER BY (missing + damaged + expired - found) DESC, p.name`,
       )
       .all(...range, ...whParams)
-      .map((x) => ({ ...x, net_loss_value: Math.round((x.missing + x.damaged + x.expired - x.found) * x.unit_cost * 100) / 100 }));
+      .map((x) => ({ ...x, net_loss: x.missing + x.damaged + x.expired - x.found }));
 
     const byWarehouse = db
       .prepare(
         `SELECT w.id, w.name,
-           COALESCE(SUM(CASE WHEN m.type = 'adjustment' THEN -m.qty * p.unit_cost END), 0) AS count_loss_value,
-           COALESCE(SUM(CASE WHEN m.type = 'write_off' THEN m.qty * p.unit_cost END), 0) AS expired_value
+           COALESCE(SUM(CASE WHEN m.type = 'adjustment' AND m.qty < 0 THEN -m.qty END), 0) AS missing,
+           COALESCE(SUM(CASE WHEN m.type = 'adjustment' AND m.qty > 0 THEN m.qty END), 0) AS found,
+           COALESCE(SUM(CASE WHEN m.type = 'write_off' THEN m.qty END), 0) AS expired
          FROM warehouses w
          LEFT JOIN movements m ON COALESCE(m.to_warehouse_id, m.from_warehouse_id) = w.id
            AND m.type IN ('adjustment','write_off') AND m.created_at BETWEEN ? AND ?
-         LEFT JOIN products p ON p.id = m.product_id
          WHERE w.active = 1 ${wh ? 'AND w.id = ?' : ''}
          GROUP BY w.id ORDER BY w.name`,
       )
@@ -406,7 +403,7 @@ function reportRoutes(db) {
            SUM(CASE WHEN l.variance = 0 THEN 1 ELSE 0 END) AS exact,
            SUM(CASE WHEN l.variance != 0 THEN 1 ELSE 0 END) AS differences,
            SUM(CASE WHEN l.status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
-           COALESCE(SUM(CASE WHEN l.status IN ('auto','approved') THEN l.variance * l.unit_cost END), 0) AS adjusted_value
+           COALESCE(SUM(CASE WHEN l.status IN ('auto','approved') THEN l.variance END), 0) AS adjusted_units
          FROM count_lines l JOIN stock_counts sc ON sc.id = l.count_id JOIN users u ON u.id = sc.assigned_to
          WHERE sc.submitted_at BETWEEN ? AND ? AND l.variance IS NOT NULL ${wh ? 'AND sc.warehouse_id = ?' : ''}
          GROUP BY u.id ORDER BY differences DESC`,
@@ -415,16 +412,10 @@ function reportRoutes(db) {
       .map((x) => ({ ...x, accuracy: x.lines ? Math.round((x.exact / x.lines) * 1000) / 10 : null }));
 
     const totals = byProduct.reduce(
-      (t, x) => ({
-        missing_value: t.missing_value + x.missing * x.unit_cost,
-        found_value: t.found_value + x.found * x.unit_cost,
-        damaged_value: t.damaged_value + x.damaged * x.unit_cost,
-        expired_value: t.expired_value + x.expired * x.unit_cost,
-      }),
-      { missing_value: 0, found_value: 0, damaged_value: 0, expired_value: 0 },
+      (t, x) => ({ missing: t.missing + x.missing, found: t.found + x.found, damaged: t.damaged + x.damaged, expired: t.expired + x.expired }),
+      { missing: 0, found: 0, damaged: 0, expired: 0 },
     );
-    totals.net_loss_value = totals.missing_value + totals.damaged_value + totals.expired_value - totals.found_value;
-    for (const k of Object.keys(totals)) totals[k] = Math.round(totals[k] * 100) / 100;
+    totals.net_loss = totals.missing + totals.damaged + totals.expired - totals.found;
 
     res.json({ from, to, totals, by_product: byProduct.filter((x) => x.missing || x.found || x.damaged || x.expired), by_warehouse: byWarehouse, by_counter: byCounter });
   });

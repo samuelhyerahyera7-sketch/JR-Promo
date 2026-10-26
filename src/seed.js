@@ -113,7 +113,13 @@ function seed(db) {
       coffeeUrn: product('KCC-EQP-URN', 'Hot water urn 20L', cl.coffee, 'Equipment', 1450, 2),
       coffeeWobbler: product('KCC-POS-WOB', 'Shelf wobbler', cl.coffee, 'POS Material', 6.5, 400),
       mobileSim: product('UBM-SIM-STK', 'Starter pack SIM', cl.mobile, 'Merchandise', 1.8, 2000),
-      mobileGazebo: product('UBM-EQP-GAZ', 'Branded 3x3m gazebo', cl.mobile, 'Equipment', 4200, 3),
+      mobileGazebo: product('UBM-EQP-GAZ', 'Ubuntu Mobile branded gazebo 3x3m', cl.mobile, 'Gazebo', 4200, 3),
+      mobileBackwall: product('UBM-BWB-3X2', 'Ubuntu Mobile backwall banner 3x2.25m', cl.mobile, 'Backwall Banner', 2600, 2),
+      mobilePullup: product('UBM-PUB-85', 'Ubuntu Mobile pull-up banner 850mm', cl.mobile, 'Pull-up Banner', 750, 4),
+      juiceBackwall: product('SFJ-BWB-3X2', 'Sunfresh backwall banner 3x2.25m', cl.juice, 'Backwall Banner', 2600, 2),
+      juicePullup: product('SFJ-PUB-85', 'Sunfresh pull-up banner 850mm', cl.juice, 'Pull-up Banner', 750, 4),
+      coffeePullup: product('KCC-PUB-85', 'Kalahari Coffee pull-up banner 850mm', cl.coffee, 'Pull-up Banner', 750, 2),
+      skinPullup: product('PRS-PUB-85', 'Protea pull-up banner 850mm', cl.skin, 'Pull-up Banner', 750, 2),
       mobileCap: product('UBM-GFT-CAP', 'Ubuntu Mobile cap', cl.mobile, 'Giveaway', 38, 200),
       mobileFlyer: product('UBM-POS-FLY', 'A5 data bundle flyer', cl.mobile, 'POS Material', 0.9, 5000),
       skinTester: product('PRS-SMP-TST', 'Protea day cream tester 5ml', cl.skin, 'Sample', 7.5, 800),
@@ -126,7 +132,8 @@ function seed(db) {
       table: product('JR-TBL-FOLD', 'Folding promoter table 1.8m', cl.house, 'Promoter Table', 950, 10),
       tableSmall: product('JR-TBL-POD', 'Round demo podium table', cl.house, 'Promoter Table', 1650, 4),
       cloth: product('JR-TBL-CLOTH', 'Black stretch table cloth', cl.house, 'Setup & Display', 280, 15),
-      gazebo: product('JR-SET-GAZ', 'JR gazebo 3x3m (black)', cl.house, 'Setup & Display', 3800, 3),
+      gazebo: product('JR-SET-GAZ', 'JR gazebo 3x3m (black)', cl.house, 'Gazebo', 3800, 3),
+      gazeboSmall: product('JR-SET-GAZ2', 'JR gazebo 2x2m (black)', cl.house, 'Gazebo', 2900, 2),
       flag: product('JR-SET-FLAG', 'Telescopic banner flag with base', cl.house, 'Setup & Display', 650, 6),
       cooler: product('JR-EQP-COOL', 'Cooler box 40L', cl.house, 'Equipment', 720, 4),
     };
@@ -181,6 +188,9 @@ function seed(db) {
     receive(30, wh.jhb, 'GRN-24090', [...house(20, 30, 5, 10, 8), ...Object.values(polo).map((id) => [id, 8])], u.whJhb, 'Supplier: Cape Union Mart corporate');
     receive(30, wh.cpt, 'GRN-24091', house(8, 10, 2, 4, 3), u.whCpt);
     receive(30, wh.dbn, 'GRN-24092', [...house(6, 8, 2, 4, 3), ...Object.values(polo).map((id) => [id, 4])], u.whDbn);
+    receive(29, wh.jhb, 'GRN-24095', [[p.gazeboSmall, 3], [p.juiceBackwall, 2], [p.juicePullup, 6], [p.coffeePullup, 3]], u.whJhb, 'Printed by Signage Express');
+    receive(29, wh.dbn, 'GRN-24096', [[p.gazeboSmall, 2], [p.mobileBackwall, 2], [p.mobilePullup, 4]], u.whDbn, 'Printed by Signage Express');
+    receive(29, wh.cpt, 'GRN-24097', [[p.skinPullup, 3], [p.mobilePullup, 2]], u.whCpt);
     receive(28, wh.jhb, 'GRN-24101', [[p.juiceSample, 6000, 20], [p.juiceCup, 200], [p.juiceAframe, 12], [p.juiceTee, 60]], u.whJhb, 'Courier: Ram Hand-to-Hand');
     receive(27, wh.jhb, 'GRN-24102', [[p.coffeeSachet, 10000, 200], [p.coffeeMug, 400], [p.coffeeUrn, 6], [p.coffeeWobbler, 1200]], u.whJhb);
     receive(26, wh.cpt, 'GRN-24103', [[p.mobileSim, 8000], [p.mobileGazebo, 6], [p.mobileCap, 600], [p.mobileFlyer, 20000]], u.whCpt);
@@ -192,22 +202,29 @@ function seed(db) {
       stock.transfer(db, { productId: p.mobileSim, fromWarehouseId: wh.cpt, toWarehouseId: wh.dbn, qty: 2500, reference: 'TRF-0001', userId: u.whCpt });
     });
 
-    const campaign = (name, clientId, am, region, start, end, status, promoters) => {
+    const campaign = (name, clientId, am, region, start, end, status, promoters, colour) => {
       const id = ins(
-        'INSERT INTO campaigns (name, client_id, account_manager_id, region, start_date, end_date, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        name, clientId, am, region, start, end, status,
+        'INSERT INTO campaigns (name, client_id, account_manager_id, region, start_date, end_date, status, colour) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        name, clientId, am, region, start, end, status, colour,
       );
       for (const pid of promoters) ins('INSERT INTO campaign_promoters (campaign_id, promoter_id) VALUES (?, ?)', id, pid);
       return id;
     };
     const c = {
-      juice: campaign('Sunfresh Summer Tastings', cl.juice, u.am1, 'Gauteng', day(-21), day(30), 'active', [u.p1, u.p2]),
-      coffee: campaign('Kalahari Morning Commute', cl.coffee, u.am1, 'Gauteng', day(-14), day(14), 'active', [u.p2]),
-      mobile: campaign('Ubuntu Mobile Taxi Rank Drive', cl.mobile, u.am2, 'KwaZulu-Natal', day(-15), day(45), 'active', [u.p3, u.p5]),
-      skin: campaign('Protea Mall Sampling', cl.skin, u.am2, 'Western Cape', day(-10), day(20), 'active', [u.p4]),
-      sauce: campaign('Braai Master Heritage Month', cl.sauce, u.am1, 'KwaZulu-Natal', day(-40), day(-3), 'completed', [u.p3, u.p5]),
-      juiceDbn: campaign('Sunfresh Durban Launch', cl.juice, u.am1, 'KwaZulu-Natal', day(5), day(40), 'planned', [u.p5]),
+      juice: campaign('Sunfresh Summer Tastings', cl.juice, u.am1, 'Gauteng', day(-21), day(30), 'active', [u.p1, u.p2], 'orange'),
+      coffee: campaign('Kalahari Morning Commute', cl.coffee, u.am1, 'Gauteng', day(-14), day(14), 'active', [u.p2], 'brown'),
+      mobile: campaign('Ubuntu Mobile Taxi Rank Drive', cl.mobile, u.am2, 'KwaZulu-Natal', day(-15), day(45), 'active', [u.p3, u.p5], 'yellow'),
+      skin: campaign('Protea Mall Sampling', cl.skin, u.am2, 'Western Cape', day(-10), day(20), 'active', [u.p4], 'pink'),
+      sauce: campaign('Braai Master Heritage Month', cl.sauce, u.am1, 'KwaZulu-Natal', day(-40), day(-3), 'completed', [u.p3, u.p5], 'red'),
+      juiceDbn: campaign('Sunfresh Durban Launch', cl.juice, u.am1, 'KwaZulu-Natal', day(5), day(40), 'planned', [u.p5], 'lime'),
     };
+    // Shelve each client's stock under its campaign colour (company stock stays untagged)
+    const shelve = (campaignId, ids) => ids.forEach((pid) => db.prepare('UPDATE products SET campaign_id = ? WHERE id = ?').run(campaignId, pid));
+    shelve(c.juice, [p.juiceSample, p.juiceCup, p.juiceAframe, p.juiceTee, p.juiceBackwall, p.juicePullup]);
+    shelve(c.coffee, [p.coffeeSachet, p.coffeeMug, p.coffeeUrn, p.coffeeWobbler, p.coffeePullup]);
+    shelve(c.mobile, [p.mobileSim, p.mobileGazebo, p.mobileCap, p.mobileFlyer, p.mobileBackwall, p.mobilePullup]);
+    shelve(c.skin, [p.skinTester, p.skinBag, p.skinStand, p.skinPullup]);
+    shelve(c.sauce, [p.sauceSachet, p.sauceApron, p.sauceTable]);
 
     let reqNo = 0;
     const request = ({ campaignId, warehouseId, promoterId, by, lines, status, daysAgo, approver, dispatcher, method = 'collect', waybill = null, neededIn = 3 }) => {
@@ -393,6 +410,7 @@ function seed(db) {
     };
     kit('In-store tasting setup', 'One table with cloth and a cooler box', [[p.table, 1], [p.cloth, 1], [p.cooler, 1]]);
     kit('Outdoor activation setup', 'Gazebo, table, cloth and two banner flags', [[p.gazebo, 1], [p.table, 1], [p.cloth, 1], [p.flag, 2]]);
+    kit('Small mall setup', '2x2m gazebo, table and cloth', [[p.gazeboSmall, 1], [p.table, 1], [p.cloth, 1]]);
     kit('Demo podium setup', 'Round podium table with cloth', [[p.tableSmall, 1], [p.cloth, 1]]);
 
     // Campaign stock plans
@@ -405,6 +423,58 @@ function seed(db) {
     plan(c.juiceDbn, [[p.juiceSample, 1500], [p.juiceCup, 40], [p.gazebo, 1], [p.table, 1], [p.cloth, 1], [polo['m-Black-M'], 2]]);
 
     db.prepare("UPDATE stock SET bin = 'A-' || (product_id % 9 + 1) || '-0' || (product_id % 4 + 1)").run();
+
+    // Setups & strike downs: one done last week, one standing now (strike down today), one tomorrow
+    let setupNo = 0;
+    const localAt = (offsetDays, hhmm) => `${day(offsetDays)}T${hhmm}`;
+    const setup = ({ campaignId, warehouseId, venue, address, contact, setupAt, strikeAt, lead, crew, items, status, loadedBy, ago }) => {
+      setupNo += 1;
+      const ref = `SET-${String(setupNo).padStart(5, '0')}`;
+      const id = ins(
+        `INSERT INTO setups (ref, campaign_id, warehouse_id, venue, address, contact, setup_at, strike_at, lead_id, status, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)`,
+        ref, campaignId, warehouseId, venue, address, contact, setupAt, strikeAt, lead, u.whManager, stamp(ago + 3, 9),
+      );
+      for (const m of crew) ins('INSERT INTO setup_crew (setup_id, user_id) VALUES (?, ?)', id, m);
+      const itemIds = items.map(([productId, qty]) => [ins('INSERT INTO setup_items (setup_id, product_id, qty) VALUES (?, ?, ?)', id, productId, qty), productId, qty]);
+      if (status === 'scheduled') return;
+      dated(ago, () => {
+        for (const [itemId, productId, qty] of itemIds) {
+          stock.dispatch(db, { productId, warehouseId, promoterId: lead, campaignId, qty, reference: ref, userId: loadedBy });
+          db.prepare('UPDATE setup_items SET qty_out = ? WHERE id = ?').run(qty, itemId);
+        }
+      });
+      const place = PLACES[venue.split(' (')[0]] || [null, null];
+      db.prepare(`UPDATE setups SET status = 'loaded', loaded_by = ?, loaded_at = ?, set_up_by = ?, set_up_at = ?, set_up_lat = ?, set_up_lng = ? WHERE id = ?`)
+        .run(loadedBy, stamp(ago, 6), lead, stamp(ago, 9), place[0], place[1], id);
+      db.prepare("UPDATE setups SET status = 'set_up' WHERE id = ?").run(id);
+      if (status === 'returned') {
+        dated(ago - 2, () => {
+          for (const [itemId, productId, qty] of itemIds) {
+            const damaged = productId === p.cloth ? 1 : 0;
+            stock.returnToWarehouse(db, { productId, warehouseId, promoterId: lead, campaignId, qtyGood: qty - damaged, qtyDamaged: damaged, reference: ref, userId: loadedBy });
+            db.prepare('UPDATE setup_items SET qty_good = ?, qty_damaged = ? WHERE id = ?').run(qty - damaged, damaged, itemId);
+          }
+        });
+        db.prepare(`UPDATE setups SET status = 'returned', struck_by = ?, struck_at = ?, struck_lat = ?, struck_lng = ?, returned_by = ?, returned_at = ? WHERE id = ?`)
+          .run(lead, stamp(ago - 2, 17), place[0], place[1], loadedBy, stamp(ago - 3, 9), id);
+      }
+    };
+    setup({
+      campaignId: c.coffee, warehouseId: wh.jhb, venue: 'Park Station concourse', address: 'Park Station, Rissik St, Johannesburg',
+      contact: 'Station manager, 011 555 0199', setupAt: localAt(-9, '05:00'), strikeAt: localAt(-7, '19:00'), lead: u.p2, crew: [u.whJhb],
+      items: [[p.gazeboSmall, 1], [p.table, 2], [p.cloth, 2], [p.coffeePullup, 2]], status: 'returned', loadedBy: u.whJhb, ago: 9,
+    });
+    setup({
+      campaignId: c.mobile, warehouseId: wh.dbn, venue: 'Warwick Junction taxi rank', address: 'Warwick Ave, Durban CBD',
+      contact: 'Rank marshal: Mr Dube, 031 555 0144', setupAt: localAt(-2, '06:00'), strikeAt: localAt(0, '17:00'), lead: u.p3, crew: [u.p5, u.whDbn],
+      items: [[p.gazebo, 1], [p.mobileBackwall, 1], [p.mobilePullup, 2], [p.table, 1], [p.cloth, 1]], status: 'set_up', loadedBy: u.whDbn, ago: 2,
+    });
+    setup({
+      campaignId: c.juice, warehouseId: wh.jhb, venue: 'Checkers Hyper Sandton City', address: 'Sandton City, Rivonia Rd, Sandton',
+      contact: 'Centre management, 011 555 0123', setupAt: localAt(1, '07:00'), strikeAt: localAt(3, '18:00'), lead: u.p1, crew: [u.p2, u.whJhb],
+      items: [[p.gazebo, 1], [p.juiceBackwall, 1], [p.juicePullup, 2], [p.table, 2], [p.cloth, 2]], status: 'scheduled', ago: 0,
+    });
 
     // Stock counts: one finished, one waiting for the manager, open ones on the floor
     let cnt = 0;

@@ -34,6 +34,7 @@ h3 { font-size: 1rem; margin: 0 0 8px; }
 
 /* ---------- layout ---------- */
 .shell { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+.shell > div { min-width: 0; }
 .sidebar {
   background: var(--brand); color: #dfeef1; padding: 16px 12px; position: sticky; top: 0; height: 100vh;
   overflow-y: auto; display: flex; flex-direction: column; gap: 4px;
@@ -287,6 +288,43 @@ td.clickable:hover { background: #f0f6f7; }
 .kit-items { margin: 0; padding-left: 18px; }
 .card.clickable { cursor: pointer; }
 .card.clickable:hover { border-color: var(--brand-2); }
+
+/* ---------- campaign colours ---------- */
+.swatch { display: inline-block; border-radius: 4px; vertical-align: -2px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.15); flex: none; }
+.camp-tag { display: inline-flex; gap: 6px; align-items: center; }
+.shelf-tag { display: inline-block; margin-top: 3px; font-size: 0.75rem; font-weight: 600; padding: 1px 8px 1px 6px; border-radius: 999px; border-left: 6px solid var(--c); background: #f2f4f6; }
+.with-stripe { border-left: 5px solid var(--c, transparent); padding-left: 8px; margin-left: -8px; min-width: 220px; }
+.colour-picker { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.colour-choice { background: #fff; color: var(--text); border: 1px solid var(--border); font-weight: 500; padding: 5px 10px; }
+.colour-choice .swatch { width: 16px; height: 16px; }
+.colour-choice.on { border-color: var(--brand); box-shadow: 0 0 0 2px var(--brand); font-weight: 700; }
+.shelf-hint { display: flex; gap: 8px; align-items: center; font-weight: 600; min-height: 4px; }
+.qr-label.banded { border-left: 10px solid var(--c); }
+.label-band { margin-top: 3px; font-weight: 700; font-size: 0.72rem; text-transform: uppercase; }
+.shelf-sign { border: 3px solid var(--c); border-radius: 14px; overflow: hidden; margin: 0 0 16px; break-inside: avoid; background: #fff; }
+.shelf-sign-band { background: var(--c); color: #fff; font-size: 2.6rem; font-weight: 800; letter-spacing: 0.06em; padding: 14px 22px; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35); }
+.shelf-sign-body { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 16px 22px; font-size: 1.1rem; }
+.shelf-sign-name { font-size: 1.8rem; font-weight: 800; }
+
+/* ---------- setups ---------- */
+.agenda-day { margin-bottom: 18px; }
+.agenda-day h3 { margin: 6px 0 8px; }
+.agenda-day.overdue h3 { color: var(--danger); }
+.agenda-item { border-left: 6px solid var(--c); }
+.agenda-time { width: 92px; flex: none; font-weight: 700; font-size: 1.05rem; }
+.agenda-kind { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; margin-top: 2px; }
+.agenda-kind.setup { color: var(--ok); }
+.agenda-kind.strike { color: #b25e00; }
+.agenda-kind.return { color: var(--info); }
+.setup-head { border-top: 6px solid var(--c); }
+.stage-list { display: grid; gap: 0; }
+.stage { display: flex; gap: 12px; align-items: flex-start; padding: 0 0 14px 2px; position: relative; color: var(--muted); }
+.stage:not(:last-child)::before { content: ''; position: absolute; left: 8px; top: 18px; bottom: 0; width: 2px; background: var(--border); }
+.stage-dot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #c9d2d9; background: #fff; margin-top: 3px; flex: none; z-index: 1; }
+.stage.done { color: var(--text); }
+.stage.done .stage-dot { background: var(--ok); border-color: var(--ok); }
+.stage.current { color: var(--text); }
+.stage.current .stage-dot { background: var(--accent); border-color: #e0962b; }
 
 /* ---------- labels & badges ---------- */
 .print-only { display: none; }

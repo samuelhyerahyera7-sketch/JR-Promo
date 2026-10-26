@@ -18,14 +18,14 @@ function dashboardRoutes(db) {
 
     const totals = db
       .prepare(
-        `SELECT COUNT(DISTINCT p.id) AS skus, COALESCE(SUM(s.qty), 0) AS units, COALESCE(SUM(s.qty * p.unit_cost), 0) AS value
+        `SELECT COUNT(DISTINCT p.id) AS skus, COALESCE(SUM(s.qty), 0) AS units
          FROM products p JOIN clients cl ON cl.id = p.client_id LEFT JOIN stock s ON s.product_id = p.id
          WHERE p.active = 1 AND ${cs.sql}`,
       )
       .get(...cs.params);
     const field = db
       .prepare(
-        `SELECT COALESCE(SUM(f.qty), 0) AS units, COALESCE(SUM(f.qty * p.unit_cost), 0) AS value
+        `SELECT COALESCE(SUM(f.qty), 0) AS units
          FROM field_stock f JOIN products p ON p.id = f.product_id JOIN clients cl ON cl.id = p.client_id WHERE ${cs.sql}`,
       )
       .get(...cs.params);
@@ -54,26 +54,16 @@ function dashboardRoutes(db) {
       `SELECT COUNT(*) AS n FROM campaigns c WHERE c.status = 'active' AND ${cps.sql}`,
       ...cps.params,
     );
-    if (user.role !== 'warehouse') {
-      out.kpis.stock_value = Math.round(totals.value * 100) / 100;
-      out.kpis.field_value = Math.round(field.value * 100) / 100;
-    }
 
     out.low_stock = low.slice(0, 15);
-    const valueCol =
-      user.role !== 'warehouse'
-        ? `, COALESCE((SELECT SUM(s.qty * p.unit_cost) FROM stock s JOIN products p ON p.id = s.product_id
-             JOIN clients cl ON cl.id = p.client_id WHERE s.warehouse_id = w.id AND ${cs.sql}), 0) AS value`
-        : '';
     out.by_warehouse = db
       .prepare(
         `SELECT w.id, w.name, w.city,
            COALESCE((SELECT SUM(s.qty) FROM stock s JOIN products p ON p.id = s.product_id
              JOIN clients cl ON cl.id = p.client_id WHERE s.warehouse_id = w.id AND ${cs.sql}), 0) AS units
-           ${valueCol}
          FROM warehouses w WHERE w.active = 1 ORDER BY w.name`,
       )
-      .all(...cs.params, ...(valueCol ? cs.params : []));
+      .all(...cs.params);
 
     // Daily flow for the last 30 days: what went out vs came in
     const since = new Date(Date.now() - 29 * 864e5).toISOString().slice(0, 10);
@@ -93,9 +83,9 @@ function dashboardRoutes(db) {
     if (isManagement(user) || amOnly) {
       out.by_client = db
         .prepare(
-          `SELECT cl.id, cl.name, COALESCE(SUM(s.qty), 0) AS units, COALESCE(SUM(s.qty * p.unit_cost), 0) AS value
+          `SELECT cl.id, cl.name, COALESCE(SUM(s.qty), 0) AS units
            FROM clients cl LEFT JOIN products p ON p.client_id = cl.id LEFT JOIN stock s ON s.product_id = p.id
-           WHERE cl.active = 1 AND ${cs.sql} GROUP BY cl.id ORDER BY value DESC`,
+           WHERE cl.active = 1 AND ${cs.sql} GROUP BY cl.id ORDER BY units DESC`,
         )
         .all(...cs.params);
     }
@@ -106,7 +96,7 @@ function dashboardRoutes(db) {
       out.queue = db
         .prepare(
           `SELECT r.id, r.ref, r.status, r.needed_by, r.delivery_method, w.name AS warehouse_name,
-             u.name AS promoter_name, c.name AS campaign_name,
+             u.name AS promoter_name, c.name AS campaign_name, c.colour AS campaign_colour,
              (SELECT SUM(qty_approved) FROM request_items ri WHERE ri.request_id = r.id) AS units
            FROM requests r JOIN warehouses w ON w.id = r.warehouse_id JOIN users u ON u.id = r.promoter_id
            JOIN campaigns c ON c.id = r.campaign_id
@@ -117,7 +107,7 @@ function dashboardRoutes(db) {
     } else {
       out.awaiting_approval = db
         .prepare(
-          `SELECT r.id, r.ref, r.needed_by, u.name AS promoter_name, c.name AS campaign_name, r.created_at
+          `SELECT r.id, r.ref, r.needed_by, u.name AS promoter_name, c.name AS campaign_name, c.colour AS campaign_colour, r.created_at
            FROM requests r JOIN campaigns c ON c.id = r.campaign_id JOIN users u ON u.id = r.promoter_id
            WHERE r.status = 'pending' ${amFilter} ORDER BY r.id LIMIT 20`,
         )

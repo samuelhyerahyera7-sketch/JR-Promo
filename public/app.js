@@ -4,9 +4,7 @@
 
   // ------------------------------------------------------------------ helpers
 
-  const ZAR = new Intl.NumberFormat('en-ZA', { style: 'currency', currency: 'ZAR' });
   const NUM = new Intl.NumberFormat('en-ZA');
-  const money = (n) => ZAR.format(n || 0);
   const num = (n) => NUM.format(n || 0);
 
   /** Server timestamps are UTC ("YYYY-MM-DD HH:MM:SS" or ISO); plain dates are calendar dates. */
@@ -617,6 +615,39 @@
     return { el, value: () => pending };
   }
 
+  // Campaign shelf colours, loaded from the server once signed in
+  let COLOURS = {};
+  const colourHex = (key) => (COLOURS[key] || {}).hex || '#c9d2d9';
+  const colourName = (key) => (COLOURS[key] || {}).name || '';
+  function swatch(key, size = 14) {
+    if (!key) return null;
+    return h('span', { class: 'swatch', style: `background:${colourHex(key)};width:${size}px;height:${size}px`, title: `${colourName(key)} shelf` });
+  }
+  /** Campaign name with its shelf colour, used wherever a campaign appears. */
+  const campaignTag = (name, colour) => h('span', { class: 'camp-tag' }, swatch(colour), name);
+  /** Row of colour swatches to choose a campaign's shelf colour. Empty = pick the least-used one automatically. */
+  function colourPicker(current) {
+    let chosen = current || '';
+    const wrap = h('div', { class: 'colour-picker', role: 'radiogroup' });
+    const draw = () =>
+      wrap.replaceChildren(
+        ...Object.values(COLOURS).map((c) =>
+          h(
+            'button',
+            { type: 'button', class: `colour-choice${chosen === c.key ? ' on' : ''}`, role: 'radio', 'aria-checked': String(chosen === c.key), title: c.name, onclick: () => { chosen = c.key; draw(); } },
+            h('span', { class: 'swatch', style: `background:${c.hex}` }),
+            c.name,
+          ),
+        ),
+        current ? null : h('span', { class: 'hint' }, chosen ? '' : 'Leave unselected to get the least-used colour'),
+      );
+    draw();
+    return { el: wrap, value: () => chosen };
+  }
+
+  /** "Purple shelf · Sunfresh Summer Tastings" for a product's shelf tag. */
+  const shelfTag = (x) => (x.shelf_colour ? h('span', { class: 'shelf-tag', style: `--c:${colourHex(x.shelf_colour)}` }, `${colourName(x.shelf_colour)} shelf`, x.shelf_campaign ? ` · ${x.shelf_campaign}` : '') : null);
+
   const sizeOrder = (s) => {
     const i = ['XS', 'S', 'M', 'L', 'XL', 'XXL', '3XL'].indexOf(s);
     return i === -1 ? 99 : i;
@@ -634,7 +665,6 @@
   const isApprover = () => isMgmt() || role() === 'warehouse_manager';
   const canEditProducts = () => isApprover() || role() === 'account_manager';
   const canSeeStock = () => isOps() || role() === 'account_manager';
-  const canSeeCost = () => isApprover() || role() === 'account_manager';
 
   async function lookup(key, path) {
     if (!state.lookups[key]) state.lookups[key] = get(path);
@@ -661,6 +691,7 @@
         { route: 'requests', label: 'Stock requests', count: state.counts.to_confirm },
         { route: 'usage', label: 'Activation reports' },
         { route: 'returns', label: 'Returns' },
+        { route: 'setups', label: 'Setups & strike downs' },
         { route: 'campaigns', label: 'My campaigns' },
       );
       return items;
@@ -673,6 +704,7 @@
       count: isWh() ? state.counts.to_dispatch : state.counts.pending_approval,
     });
     items.push({ route: 'returns', label: 'Returns', count: isWh() ? state.counts.pending_returns : null });
+    items.push({ route: 'setups', label: 'Setups & strike downs', count: state.counts.setups });
     items.push({ route: 'deliveries', label: 'Deliveries & waybills' }, { route: 'handovers', label: 'Handover log' });
     if (!isWh()) items.push({ route: 'campaigns', label: 'Campaigns' }, { route: 'usage', label: 'Activation reports' });
     items.push(
@@ -688,7 +720,7 @@
         { route: 'transfer', label: 'Transfer' },
         { route: 'count', label: 'Stock counts', count: state.counts.counts },
         { route: 'laundry', label: 'Laundry' },
-        { route: 'labels', label: 'QR labels' },
+        { route: 'labels', label: 'QR labels & shelf signs' },
       );
     }
     if (isApprover()) items.push({ route: 'shrinkage', label: 'Shrinkage report' });
@@ -718,11 +750,13 @@
 
   async function refreshCounts() {
     try {
-      const [d, reminders] = await Promise.all([get('/dashboard'), get('/reminders')]);
+      const [d, reminders, colours] = await Promise.all([get('/dashboard'), get('/reminders'), Object.keys(COLOURS).length ? null : get('/campaigns/colours')]);
+      if (colours) COLOURS = Object.fromEntries(colours.map((c) => [c.key, c]));
       state.counts = {
         ...(d.kpis || {}),
         reminders: reminders.filter((x) => x.severity !== 'low').length,
         counts: reminders.filter((x) => x.type === 'count_approval' || x.type === 'count_assigned').length,
+        setups: reminders.filter((x) => ['setup_load', 'strike_due', 'setup_not_back', 'setup_unconfirmed'].includes(x.type)).length,
       };
       state.lastDashboard = d;
       state.reminders = reminders;
@@ -738,6 +772,7 @@
       if (res.kind === 'promoter') go(`counter/${res.promoter.id}`);
       else if (res.kind === 'request') go(`requests/${res.id}`);
       else if (res.kind === 'return') returnDetail(res.id);
+      else if (res.kind === 'campaign') go(`campaigns/${res.id}`);
       else if (res.kind === 'product') {
         if (res.can_view) productDetail(res.product.id);
         else toast(`${res.product.sku} · ${res.product.name}`);
@@ -1012,10 +1047,8 @@
     const kpis = h(
       'div',
       { class: 'kpis' },
-      k.stock_value !== undefined ? kpi('Stock value (warehouses)', money(k.stock_value)) : null,
       kpi('Units on hand', num(k.units_on_hand)),
       kpi('Units with promoters', num(k.units_in_field)),
-      k.field_value !== undefined ? kpi('Value with promoters', money(k.field_value)) : null,
       kpi('Below reorder level', num(k.low_stock), { alert: k.low_stock > 0, href: '#/stock' }),
       !isWh() ? kpi('Awaiting approval', num(k.pending_approval), { alert: k.pending_approval > 0, href: '#/requests' }) : null,
       kpi('To pick & dispatch', num(k.to_dispatch), { href: '#/requests' }),
@@ -1032,6 +1065,7 @@
             table(
               [
                 { label: 'Ref', render: (x) => h('span', { class: 'mono' }, x.ref) },
+                { label: 'Campaign', render: (x) => campaignTag(x.campaign_name, x.campaign_colour) },
                 { label: 'Promoter', key: 'promoter_name' },
                 { label: 'From', key: 'warehouse_name' },
                 { label: 'Needed by', render: (x) => fmtDate(x.needed_by) },
@@ -1049,7 +1083,7 @@
             table(
               [
                 { label: 'Ref', render: (x) => h('span', { class: 'mono' }, x.ref) },
-                { label: 'Campaign', key: 'campaign_name' },
+                { label: 'Campaign', render: (x) => campaignTag(x.campaign_name, x.campaign_colour) },
                 { label: 'Promoter', key: 'promoter_name' },
                 { label: 'Needed by', render: (x) => fmtDate(x.needed_by) },
               ],
@@ -1075,23 +1109,23 @@
       ),
     );
 
-    const showValue = d.by_warehouse.length && d.by_warehouse[0].value !== undefined;
+
     const byWarehouse = h(
       'div',
       { class: 'card' },
       h('h2', null, 'Stock by warehouse'),
       bars(d.by_warehouse, {
         label: (x) => x.name,
-        value: (x) => (showValue ? x.value : x.units),
-        format: showValue ? money : (n) => `${num(n)} units`,
+        value: (x) => x.units,
+        format: (n) => `${num(n)} units`,
       }),
     );
     const byClient = d.by_client
       ? h(
           'div',
           { class: 'card' },
-          h('h2', null, 'Stock value by client'),
-          bars(d.by_client, { label: (x) => x.name, value: (x) => x.value, format: money }),
+          h('h2', null, 'Stock by client'),
+          bars(d.by_client, { label: (x) => x.name, value: (x) => x.units, format: (n) => `${num(n)} units` }),
         )
       : null;
 
@@ -1229,7 +1263,9 @@
 
   routes.stock = async () => {
     const [cls, cats, whs] = await Promise.all([clients(), get('/products/categories'), warehouses()]);
-    const filters = { q: '', client_id: '', category: '', low: '', expiring: '' };
+    const filters = { q: '', client_id: '', category: '', low: '', expiring: '', campaign_id: '' };
+    const camps = (await get('/campaigns')).filter((c) => ['planned', 'active'].includes(c.status));
+    const campSel = select(camps.map((c) => ({ value: c.id, label: `${colourName(c.colour)} · ${c.name}` })), {}, 'All shelves / campaigns');
     const search = input({ type: 'search', placeholder: 'Search SKU, name or barcode…' });
     const clientSel = select(cls.map((c) => ({ value: c.id, label: c.name })), {}, 'All clients');
     const catSel = select(cats.map((c) => ({ value: c, label: c })), {}, 'All categories');
@@ -1239,11 +1275,11 @@
     const activeWh = whs.filter((w) => w.active);
 
     const load = async () => {
-      Object.assign(filters, { q: search.value, client_id: clientSel.value, category: catSel.value, low: lowBox.checked ? '1' : '', expiring: expBox.checked ? '1' : '' });
+      Object.assign(filters, { q: search.value, client_id: clientSel.value, category: catSel.value, low: lowBox.checked ? '1' : '', expiring: expBox.checked ? '1' : '', campaign_id: campSel.value });
       const rows = await get(`/products${qs(filters)}`);
       const cols = [
         { label: 'SKU', render: (x) => h('span', { class: 'mono' }, x.sku) },
-        { label: 'Product', render: (x) => h('div', null, x.name, h('div', { class: 'small muted' }, `${x.client_name} · ${x.category}`)) },
+        { label: 'Product', render: (x) => h('div', { class: 'with-stripe', style: x.shelf_colour ? `--c:${colourHex(x.shelf_colour)}` : null }, x.name, h('div', { class: 'small muted' }, `${x.client_name} · ${x.category}`), shelfTag(x)) },
         {
           label: 'Expiry',
           render: (x) =>
@@ -1265,10 +1301,8 @@
         { label: 'At laundry', num: true, render: (x) => (x.in_laundry ? num(x.in_laundry) : h('span', { class: 'muted' }, '—')) },
         { label: 'Reorder at', num: true, render: (x) => num(x.reorder_level) },
       ];
-      if (canSeeCost()) cols.push({ label: 'Value', num: true, render: (x) => money(x.on_hand * x.unit_cost) });
-      const totalValue = rows.reduce((s, x) => s + x.on_hand * x.unit_cost, 0);
       out.replaceChildren(
-        h('div', { class: 'small muted', style: 'margin-bottom:8px' }, `${rows.length} products · ${num(rows.reduce((s, x) => s + x.on_hand, 0))} units on hand`, canSeeCost() ? ` · ${money(totalValue)}` : ''),
+        h('div', { class: 'small muted', style: 'margin-bottom:8px' }, `${rows.length} products · ${num(rows.reduce((s, x) => s + x.on_hand, 0))} units on hand`),
         table(cols, rows, {
           onRow: (x) => productDetail(x.id),
           rowClass: (x) => (x.reorder_level && x.on_hand <= x.reorder_level ? 'low' : ''),
@@ -1281,7 +1315,7 @@
       clearTimeout(t);
       t = setTimeout(load, 250);
     });
-    [clientSel, catSel, lowBox, expBox].forEach((el) => el.addEventListener('change', load));
+    [clientSel, catSel, campSel, lowBox, expBox].forEach((el) => el.addEventListener('change', load));
     await load();
 
     return page(
@@ -1291,7 +1325,7 @@
         canEditProducts() ? h('button', { class: 'secondary', onclick: () => rangeForm(load) }, 'New uniform range') : null,
         canEditProducts() ? h('button', { onclick: () => productForm(null, load) }, 'New product') : null,
       ],
-      h('div', { class: 'card' }, h('div', { class: 'filters' }, search, clientSel, catSel, h('label', { class: 'check' }, lowBox, 'Low stock only'), h('label', { class: 'check' }, expBox, 'Expiring / expired')), out),
+      h('div', { class: 'card' }, h('div', { class: 'filters' }, search, clientSel, catSel, campSel, h('label', { class: 'check' }, lowBox, 'Low stock only'), h('label', { class: 'check' }, expBox, 'Expiring / expired')), out),
     );
   };
 
@@ -1312,10 +1346,10 @@
           h('dt', null, 'SKU'), h('dd', { class: 'mono' }, p.sku),
           h('dt', null, 'Client'), h('dd', null, p.client_name),
           h('dt', null, 'Category'), h('dd', null, p.category),
+          h('dt', null, 'Shelf'), h('dd', null, shelfTag(p) || h('span', { class: 'muted' }, 'Not tagged to a campaign')),
           p.size ? [h('dt', null, 'Variant'), h('dd', null, [GENDER_NAMES[p.gender], p.colour, p.size].filter(Boolean).join(' · '))] : null,
           h('dt', null, 'Unit'), h('dd', null, p.unit),
           p.barcode ? [h('dt', null, 'Barcode'), h('dd', { class: 'mono' }, p.barcode)] : null,
-          canSeeCost() ? [h('dt', null, 'Unit cost'), h('dd', null, money(p.unit_cost))] : null,
           h('dt', null, 'Reorder level'), h('dd', null, num(p.reorder_level)),
           h('dt', null, 'On hand'), h('dd', null, `${num(p.on_hand)} (${num(p.allocated)} allocated, ${num(p.available)} free)`),
           p.tracks_expiry ? [h('dt', null, 'Expiry'), h('dd', null, p.expired ? badge('rejected', `${num(p.expired)} expired`) : null, ' ', p.next_expiry ? `next batch expires ${fmtDate(p.next_expiry)}` : '')] : null,
@@ -1383,7 +1417,7 @@
   }
 
   async function productForm(p, done) {
-    const [cls, cats] = await Promise.all([clients(), get('/products/categories')]);
+    const [cls, cats, allCamps] = await Promise.all([clients(), get('/products/categories'), get('/campaigns')]);
     const mine = role() === 'account_manager' ? cls.filter((c) => c.account_manager_id === state.user.id) : cls;
     const f = {
       sku: input({ value: p ? p.sku : '', maxlength: '40', placeholder: 'e.g. SFJ-SMP-200' }),
@@ -1391,16 +1425,25 @@
       client_id: select(mine.map((c) => ({ value: c.id, label: c.name })), { value: p ? p.client_id : '' }, 'Choose client…'),
       category: select(cats.map((c) => ({ value: c, label: c })), { value: p ? p.category : '' }, 'Choose…'),
       unit: input({ value: p ? p.unit : 'unit', placeholder: 'unit, box, sleeve…' }),
-      unit_cost: input({ type: 'number', step: '0.01', min: '0', value: p ? p.unit_cost : '' }),
       reorder_level: input({ type: 'number', min: '0', step: '1', value: p ? p.reorder_level : '' }),
       barcode: input({ value: p ? p.barcode || '' : '', inputmode: 'numeric' }),
       style: input({ value: p ? p.style || '' : '', placeholder: 'Groups sizes/colours, e.g. JR promoter golf shirt' }),
       gender: select(Object.entries(GENDER_NAMES).map(([value, label]) => ({ value, label })), { value: p ? p.gender || '' : '' }, '—'),
       size: select(['XS', 'S', 'M', 'L', 'XL', 'XXL', '3XL'].map((x) => ({ value: x, label: x })), { value: p ? p.size || '' : '' }, '—'),
       colour: input({ value: p ? p.colour || '' : '', placeholder: 'e.g. Black' }),
+      campaign_id: select([], {}),
       tracks_expiry: input({ type: 'checkbox', checked: p ? !!p.tracks_expiry : false }),
       active: input({ type: 'checkbox', checked: p ? !!p.active : true }),
     };
+    // Shelf campaign: the client's own campaigns, or any campaign for company stock
+    const fillCampaigns = () => {
+      const client = cls.find((c) => String(c.id) === f.client_id.value);
+      const list = allCamps.filter((c) => c.status !== 'cancelled' && (!client || client.is_house || c.client_id === client.id));
+      f.campaign_id.replaceChildren(h('option', { value: '' }, 'No campaign colour'), ...list.map((c) => h('option', { value: c.id }, `${colourName(c.colour)} · ${c.name}`)));
+      f.campaign_id.value = p && p.campaign_id && list.some((c) => c.id === p.campaign_id) ? p.campaign_id : '';
+    };
+    f.client_id.addEventListener('change', fillCampaigns);
+    fillCampaigns();
     const uniformFields = h('div', { class: 'form-grid field full uniform-fields' }, field('Cut', f.gender), field('Size', f.size), field('Colour', f.colour), field('Style / range', f.style));
     const syncCategory = () => (uniformFields.hidden = f.category.value !== 'Uniform');
     f.category.addEventListener('change', syncCategory);
@@ -1417,7 +1460,7 @@
         field('Category', f.category),
         uniformFields,
         field('Unit of measure', f.unit),
-        field('Unit cost (R)', f.unit_cost, { hint: 'Used for stock valuation' }),
+        field('Shelf campaign (colour)', f.campaign_id, { hint: 'Shelve it under this campaign’s colour so it’s easy to find' }),
         field('Reorder level', f.reorder_level, { hint: 'Alert when total on hand drops to this' }),
         field('Barcode', f.barcode),
         h('label', { class: 'check field full' }, f.tracks_expiry, 'Has an expiry date (track batches)'),
@@ -1448,6 +1491,13 @@
     const wh = select(whs.filter((w) => w.active).map((w) => ({ value: w.id, label: `${w.name} (${w.city})` })), { value: state.user.warehouse_id || '' }, 'Choose warehouse…');
     const ref = input({ placeholder: 'Waybill / delivery note / GRN number', maxlength: '80' });
     const note = input({ placeholder: 'Supplier, courier, condition, etc.' });
+    const camps = (await get('/campaigns')).filter((c) => ['planned', 'active'].includes(c.status));
+    const campSel = select(camps.map((c) => ({ value: c.id, label: `${colourName(c.colour)} shelf · ${c.name}` })), {}, 'Not for a specific campaign');
+    const campHint = h('div', { class: 'shelf-hint' });
+    campSel.addEventListener('change', () => {
+      const c = camps.find((x) => String(x.id) === campSel.value);
+      campHint.replaceChildren(...(c ? [swatch(c.colour, 22), ` Put this stock on the ${colourName(c.colour).toLowerCase()} shelf`] : []));
+    });
     const lines = linesEditor(productOptions(prods), { withBin: true, withBatch: true });
     const photos = [];
     const photoList = h('div', { class: 'hint' }, 'No photos added yet');
@@ -1464,7 +1514,7 @@
     const save = h('button', null, 'Book stock in');
     save.onclick = () =>
       busy(save, async () => {
-        const res = await post('/stock/receive', { warehouse_id: wh.value, reference: ref.value, note: note.value, items: lines.values() });
+        const res = await post('/stock/receive', { warehouse_id: wh.value, reference: ref.value, note: note.value, campaign_id: campSel.value || undefined, items: lines.values() });
         invalidate('products', 'warehouses');
         if (photos.length) {
           try {
@@ -1483,7 +1533,7 @@
         'div',
         { class: 'card' },
         h('p', { class: 'muted small', style: 'margin-top:0' }, 'Book client or supplier deliveries into a warehouse. Dated stock (samples etc.) needs a batch and expiry date.'),
-        h('div', { class: 'form-grid' }, field('Warehouse', wh), field('Reference', ref), field('Note', note, { full: true })),
+        h('div', { class: 'form-grid' }, field('Warehouse', wh), field('Reference', ref), field('For campaign', campSel, { hint: 'Tags the products with that campaign’s shelf colour' }), field('Note', note), h('div', { class: 'field full' }, campHint)),
         h('div', { class: 'page-head', style: 'margin:18px 0 8px' }, h('h3', { style: 'margin:0' }, 'Products received'), scanBtn),
         lines.el,
         h('h3', { style: 'margin-top:18px' }, 'Waybill & delivery photos'),
@@ -1579,7 +1629,7 @@
             { label: 'Created', render: (x) => fmtDate(x.created_at), class: 'nowrap' },
             { label: 'Progress', num: true, render: (x) => (x.status === 'open' ? `${x.counted_lines} / ${x.lines}` : `${x.lines} lines`) },
             { label: 'Differences', num: true, render: (x) => (x.status === 'open' ? '—' : num(x.variance_lines)) },
-            isApprover() ? { label: 'Adjusted', num: true, render: (x) => (x.status === 'open' ? '—' : money(x.adjusted_value)) } : null,
+            { label: 'Adjusted', num: true, render: (x) => (x.status === 'open' ? '—' : signed(x.adjusted_units)) },
             { label: 'Status', render: (x) => h('span', null, countBadge(x.status), x.pending_lines ? h('span', { class: 'small muted' }, ` ${x.pending_lines} to approve`) : null) },
           ].filter(Boolean),
           rows,
@@ -1593,15 +1643,14 @@
     let settingsCard = null;
     if (isApprover()) {
       const units = input({ type: 'number', min: '0', value: settings.tolerance_units, style: 'width:90px' });
-      const value = input({ type: 'number', min: '0', step: '0.01', value: settings.tolerance_value, style: 'width:110px' });
       const save = h('button', { class: 'secondary small' }, 'Save');
-      save.onclick = () => busy(save, async () => { await api('PUT', '/counts/settings', { tolerance_units: units.value, tolerance_value: value.value }); toast('Tolerance saved', 'ok'); });
+      save.onclick = () => busy(save, async () => { await api('PUT', '/counts/settings', { tolerance_units: units.value }); toast('Tolerance saved', 'ok'); });
       settingsCard = h(
         'div',
         { class: 'card' },
         h('h2', null, 'Approval tolerance'),
-        h('p', { class: 'muted small', style: 'margin-top:0' }, 'Differences up to this size are adjusted automatically. Anything bigger waits for a manager. Set both to 0 to approve every difference yourself.'),
-        h('div', { class: 'filters' }, h('label', { class: 'check' }, 'Up to', units, 'units'), h('label', { class: 'check' }, 'and up to R', value), save),
+        h('p', { class: 'muted small', style: 'margin-top:0' }, 'Differences up to this many units are adjusted automatically. Anything bigger waits for a manager. Set it to 0 to approve every difference yourself.'),
+        h('div', { class: 'filters' }, h('label', { class: 'check' }, 'Up to', units, 'units per line'), save),
       );
     }
     return page(
@@ -1779,7 +1828,6 @@
 
     // Submitted / closed: results, and decisions for managers
     const picked = new Set();
-    const cost = isApprover();
     const results = table(
       [
         c.can_decide
@@ -1799,7 +1847,6 @@
         { label: 'Counted', num: true, render: (x) => (x.counted_qty === null ? '—' : num(x.counted_qty)) },
         { label: 'System', num: true, render: (x) => (x.system_qty === null || x.system_qty === undefined ? '—' : num(x.system_qty)) },
         { label: 'Difference', num: true, render: (x) => (x.variance ? h('strong', { class: x.variance < 0 ? 'text-danger' : 'text-ok' }, signed(x.variance)) : x.variance === 0 ? '0' : '—') },
-        cost ? { label: 'Value', num: true, render: (x) => (x.variance ? h('span', { class: x.variance < 0 ? 'text-danger' : 'text-ok' }, money(x.variance * x.unit_cost)) : '—') } : null,
         { label: 'Status', render: (x) => h('div', null, lineBadge(x.status), x.decided_by_name ? h('div', { class: 'small muted' }, x.decided_by_name) : null, x.decision_note ? h('div', { class: 'small muted' }, x.decision_note) : null) },
       ].filter(Boolean),
       c.items,
@@ -1837,7 +1884,8 @@
       );
     }
     const selfCounted = c.status === 'submitted' && isApprover() && !c.can_decide;
-    const net = c.items.reduce((sum, l) => sum + (l.variance || 0) * (l.unit_cost || 0), 0);
+    const missing = c.items.reduce((sum, l) => sum + Math.max(-(l.variance || 0), 0), 0);
+    const found = c.items.reduce((sum, l) => sum + Math.max(l.variance || 0, 0), 0);
     return page(
       title,
       actions,
@@ -1846,7 +1894,7 @@
         'div',
         { class: 'card' },
         h('h2', null, 'Results'),
-        cost && c.items.some((l) => l.variance) ? h('p', { class: 'muted small', style: 'margin-top:0' }, `Net difference across all lines: ${money(net)}`) : null,
+        missing || found ? h('p', { class: 'muted small', style: 'margin-top:0' }, `${num(missing)} unit(s) short, ${num(found)} unit(s) extra across all lines`) : null,
         selfCounted ? h('div', { class: 'alert-box' }, 'You counted this yourself, so another manager (or a director) has to approve the differences.') : null,
         results,
         decide,
@@ -1867,11 +1915,11 @@
         h(
           'div',
           { class: 'kpis' },
-          kpi('Net loss', money(t.net_loss_value), { alert: t.net_loss_value > 0 }),
-          kpi('Missing at counts', money(t.missing_value), { alert: t.missing_value > 0 }),
-          kpi('Found at counts', money(t.found_value)),
-          kpi('Damaged', money(t.damaged_value)),
-          kpi('Expired write-offs', money(t.expired_value)),
+          kpi('Net units lost', num(t.net_loss), { alert: t.net_loss > 0 }),
+          kpi('Missing at counts', num(t.missing), { alert: t.missing > 0 }),
+          kpi('Found at counts', num(t.found)),
+          kpi('Damaged', num(t.damaged)),
+          kpi('Expired write-offs', num(t.expired)),
         ),
         h(
           'div',
@@ -1879,8 +1927,9 @@
           h('div', { class: 'card' }, h('h2', null, 'By warehouse'), table(
             [
               { label: 'Warehouse', key: 'name' },
-              { label: 'Count losses', num: true, render: (x) => h('span', { class: x.count_loss_value > 0 ? 'text-danger' : '' }, money(x.count_loss_value)) },
-              { label: 'Expired', num: true, render: (x) => money(x.expired_value) },
+              { label: 'Missing', num: true, render: (x) => h('span', { class: x.missing > 0 ? 'text-danger' : '' }, num(x.missing)) },
+              { label: 'Found', num: true, render: (x) => num(x.found) },
+              { label: 'Expired', num: true, render: (x) => num(x.expired) },
             ],
             d.by_warehouse,
           )),
@@ -1890,7 +1939,7 @@
               { label: 'Lines', num: true, render: (x) => num(x.lines) },
               { label: 'Exact', num: true, render: (x) => `${x.accuracy}%` },
               { label: 'Rejected', num: true, render: (x) => num(x.rejected) },
-              { label: 'Adjusted', num: true, render: (x) => money(x.adjusted_value) },
+              { label: 'Units adjusted', num: true, render: (x) => signed(x.adjusted_units) },
             ],
             d.by_counter,
             { empty: 'No counts submitted in this period' },
@@ -1903,7 +1952,7 @@
             { label: 'Found', num: true, render: (x) => (x.found ? num(x.found) : '—') },
             { label: 'Damaged', num: true, render: (x) => (x.damaged ? num(x.damaged) : '—') },
             { label: 'Expired', num: true, render: (x) => (x.expired ? num(x.expired) : '—') },
-            { label: 'Net loss', num: true, render: (x) => h('strong', { class: x.net_loss_value > 0 ? 'text-danger' : '' }, money(x.net_loss_value)) },
+            { label: 'Net lost', num: true, render: (x) => h('strong', { class: x.net_loss > 0 ? 'text-danger' : '' }, signed(x.net_loss)) },
           ],
           d.by_product,
           { empty: 'No losses or gains in this period 🎉' },
@@ -1921,11 +1970,10 @@
     const rows = await get('/stock/field');
     const cols = [
       { label: 'Promoter', render: (x) => h('div', null, x.promoter_name, h('div', { class: 'small muted' }, x.region || '')) },
-      { label: 'Campaign', render: (x) => h('div', null, x.campaign_name, ' ', x.campaign_status === 'active' ? null : badge(x.campaign_status)) },
+      { label: 'Campaign', render: (x) => h('div', null, campaignTag(x.campaign_name, x.campaign_colour), ' ', x.campaign_status === 'active' ? null : badge(x.campaign_status)) },
       { label: 'Product', render: (x) => h('div', null, x.product_name, h('div', { class: 'small muted mono' }, x.sku)) },
       { label: 'Qty', num: true, render: (x) => num(x.qty) },
     ];
-    if (canSeeCost()) cols.push({ label: 'Value', num: true, render: (x) => money(x.qty * x.unit_cost) });
     const overdue = rows.filter((x) => ['completed', 'cancelled'].includes(x.campaign_status));
     return page(
       'Stock with promoters',
@@ -2008,7 +2056,7 @@
         table(
           [
             { label: 'Ref', render: (x) => h('span', { class: 'mono' }, x.ref) },
-            { label: 'Campaign', render: (x) => h('div', null, x.campaign_name, h('div', { class: 'small muted' }, x.client_name)) },
+            { label: 'Campaign', render: (x) => h('div', null, campaignTag(x.campaign_name, x.campaign_colour), h('div', { class: 'small muted' }, x.client_name)) },
             r === 'promoter' ? null : { label: 'Promoter', key: 'promoter_name' },
             { label: 'Warehouse', key: 'warehouse_name' },
             { label: 'Needed by', render: (x) => fmtDate(x.needed_by), class: 'nowrap' },
@@ -2063,7 +2111,7 @@
     const items = table(
       [
         { label: 'Product', render: (x) => h('div', null, x.product_name, h('div', { class: 'small muted mono' }, x.sku), x.batches ? h('div', { class: 'small muted' }, `Batch: ${x.batches}`) : null) },
-        isOps() ? { label: 'Bin', render: (x) => x.bin || '—' } : null,
+        isOps() ? { label: 'Shelf', render: (x) => h('div', { class: 'nowrap' }, swatch(x.shelf_colour, 16), ' ', h('span', { class: 'mono' }, x.bin || '—'), x.shelf_colour ? h('div', { class: 'small muted' }, colourName(x.shelf_colour)) : null) } : null,
         isOps() || canManage ? { label: `In ${q.warehouse_name}`, num: true, render: (x) => num(x.warehouse_qty) } : null,
         { label: 'Requested', num: true, render: (x) => num(x.qty_requested) },
         {
@@ -2210,7 +2258,7 @@
           h(
             'dl',
             { class: 'dl' },
-            h('dt', null, 'Campaign'), h('dd', null, h('a', { href: `#/campaigns/${q.campaign_id}` }, q.campaign_name), ` · ${q.client_name}`),
+            h('dt', null, 'Campaign'), h('dd', null, swatch(q.campaign_colour), ' ', h('a', { href: `#/campaigns/${q.campaign_id}` }, q.campaign_name), ` · ${q.client_name}`),
             h('dt', null, 'Promoter'), h('dd', null, q.promoter_name, q.promoter_phone ? ` · ${q.promoter_phone}` : '', q.promoter_size ? h('div', { class: 'small muted' }, `Uniform size ${GENDER_NAMES[q.promoter_gender] || ''} ${q.promoter_size}`) : null),
             h('dt', null, 'From'), h('dd', null, q.warehouse_name),
             h('dt', null, 'Needed by'), h('dd', null, fmtDate(q.needed_by)),
@@ -2670,7 +2718,7 @@
         { class: 'card' },
         table(
           [
-            { label: 'Campaign', render: (x) => h('div', null, h('strong', null, x.name), h('div', { class: 'small muted' }, x.client_name)) },
+            { label: 'Campaign', render: (x) => h('div', null, h('strong', null, campaignTag(x.name, x.colour)), h('div', { class: 'small muted' }, `${x.client_name}${x.colour ? ` · ${colourName(x.colour)} shelf` : ''}`)) },
             { label: 'Region', render: (x) => x.region || '—' },
             { label: 'Dates', render: (x) => `${fmtDate(x.start_date)} – ${fmtDate(x.end_date)}`, class: 'nowrap' },
             role() === 'promoter' ? null : { label: 'Account manager', render: (x) => x.account_manager_name || '—' },
@@ -2688,13 +2736,12 @@
   async function campaignDetail(id) {
     const [c, reqs] = await Promise.all([get(`/campaigns/${id}`), get(`/requests${qs({ campaign_id: id })}`)]);
     const canManage = isMgmt() || (role() === 'account_manager' && c.account_manager_id === state.user.id);
-    const cost = canSeeCost();
     const totals = c.summary.reduce(
-      (t, x) => ({ dispatched: t.dispatched + x.dispatched, used: t.used + x.used, damaged: t.damaged + x.damaged, returned: t.returned + x.returned, in_field: t.in_field + x.in_field, cost: t.cost + (x.cost_used || 0) }),
-      { dispatched: 0, used: 0, damaged: 0, returned: 0, in_field: 0, cost: 0 },
+      (t, x) => ({ dispatched: t.dispatched + x.dispatched, used: t.used + x.used, damaged: t.damaged + x.damaged, returned: t.returned + x.returned, in_field: t.in_field + x.in_field }),
+      { dispatched: 0, used: 0, damaged: 0, returned: 0, in_field: 0 },
     );
     return page(
-      h('span', null, c.name, ' ', badge(c.status)),
+      h('span', null, campaignTag(c.name, c.colour), ' ', badge(c.status)),
       [
         h('a', { class: 'btn secondary', href: '#/campaigns' }, '← Campaigns'),
         !isWh() && ['planned', 'active'].includes(c.status) ? h('button', { onclick: () => requestForm() }, 'Request stock') : null,
@@ -2708,7 +2755,6 @@
         kpi('Damaged', num(totals.damaged), { alert: totals.damaged > 0 }),
         kpi('Returned', num(totals.returned)),
         kpi('Still with promoters', num(totals.in_field)),
-        cost ? kpi('Cost of stock used', money(totals.cost)) : null,
       ),
       h(
         'div',
@@ -2737,6 +2783,7 @@
         ),
       ),
       role() === 'promoter' ? null : h('div', { style: 'margin-top:16px' }, planCard(c, canManage)),
+      role() === 'promoter' ? null : shelfCard(c),
       h(
         'div',
         { class: 'card', style: 'margin-top:16px' },
@@ -2750,7 +2797,6 @@
             { label: 'Damaged', num: true, render: (x) => num(x.damaged) },
             { label: 'Returned', num: true, render: (x) => num(x.returned) },
             { label: 'With promoters', num: true, render: (x) => num(x.in_field) },
-            cost ? { label: 'Cost used', num: true, render: (x) => money(x.cost_used) } : null,
           ].filter(Boolean),
           c.summary,
           { empty: 'No stock has moved on this campaign yet' },
@@ -2801,6 +2847,7 @@
       const box = input({ type: 'checkbox', value: p.id, checked: assigned.has(p.id) });
       return h('label', { class: 'check', style: 'margin:4px 14px 4px 0' }, box, `${p.name}${p.region ? ` (${p.region})` : ''}`);
     });
+    const picker = colourPicker(c ? c.colour : null);
     const save = h('button', null, c ? 'Save campaign' : 'Create campaign');
     const m = modal(
       c ? `Edit ${c.name}` : 'New campaign',
@@ -2812,6 +2859,7 @@
         isMgmt() ? field('Account manager', f.account_manager_id) : null,
         field('Region', f.region),
         field('Status', f.status),
+        field('Shelf colour', picker.el, { full: true, hint: 'Stock for this campaign is shelved under this colour. Use matching tape or stickers on the shelves.' }),
         field('Start date', f.start_date),
         field('End date', f.end_date),
         field('Promoters', h('div', { style: 'display:flex;flex-wrap:wrap' }, boxes.length ? boxes : h('span', { class: 'muted' }, 'No promoters set up yet')), { full: true }),
@@ -2822,6 +2870,7 @@
     save.onclick = () =>
       busy(save, async () => {
         const body = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value]));
+        body.colour = picker.value() || undefined;
         body.promoter_ids = boxes.map((b) => b.querySelector('input')).filter((b) => b.checked).map((b) => Number(b.value));
         const saved = c ? await put(`/campaigns/${c.id}`, body) : await post('/campaigns', body);
         invalidate('campaigns');
@@ -2843,7 +2892,7 @@
       { label: 'Products', num: true, render: (x) => num(x.product_count) },
       { label: 'Active campaigns', num: true, render: (x) => num(x.active_campaigns) },
     ];
-    if (canSeeCost()) cols.push({ label: 'Stock value', num: true, render: (x) => money(x.stock_value) });
+    cols.push({ label: 'Units in stock', num: true, render: (x) => num(x.units) });
     return page(
       'Clients',
       [isMgmt() ? h('button', { onclick: () => clientForm() }, 'New client') : null],
@@ -2895,7 +2944,6 @@
             { label: 'Location', render: (x) => `${x.city}, ${x.province}` },
             { label: 'Address', render: (x) => x.address || '—' },
             { label: 'Units', num: true, render: (x) => num(x.units) },
-            { label: 'Value', num: true, render: (x) => money(x.value) },
           ],
           rows,
           { onRow: (x) => warehouseForm(x) },
@@ -3199,7 +3247,7 @@
           { class: 'card' },
           h('h2', null, `Ready to collect (${ready.length})`),
           ready.length
-            ? h('div', { class: 'list' }, ready.map((r) => h('div', { class: 'list-item clickable', onclick: () => go(`requests/${r.id}`) }, h('div', null, h('strong', { class: 'mono' }, r.ref), ' · ', r.campaign_name, h('div', { class: 'small muted' }, `${r.warehouse_name}${myWh && r.warehouse_id !== myWh ? ' (another warehouse)' : ''} · ${DELIVERY[r.delivery_method]}${r.needed_by ? ` · needed ${fmtDate(r.needed_by)}` : ''}`)), h('span', { class: 'btn small' }, 'Issue →'))))
+            ? h('div', { class: 'list' }, ready.map((r) => h('div', { class: 'list-item clickable', onclick: () => go(`requests/${r.id}`) }, h('div', null, h('strong', { class: 'mono' }, r.ref), ' · ', campaignTag(r.campaign_name, r.campaign_colour), h('div', { class: 'small muted' }, `${r.warehouse_name}${myWh && r.warehouse_id !== myWh ? ' (another warehouse)' : ''} · ${DELIVERY[r.delivery_method]}${r.needed_by ? ` · needed ${fmtDate(r.needed_by)}` : ''}`)), h('span', { class: 'btn small' }, 'Issue →'))))
             : h('div', { class: 'empty' }, 'Nothing approved for this promoter'),
           transit.length ? [h('h3', { style: 'margin-top:14px' }, 'On the way to them'), h('div', { class: 'list' }, transit.map((r) => h('div', { class: 'list-item clickable', onclick: () => go(`requests/${r.id}`) }, h('div', null, h('strong', { class: 'mono' }, r.ref), ` · ${r.waybill ? `waybill ${r.waybill}` : DELIVERY[r.delivery_method]}`), badge(r.status))))] : null,
         ),
@@ -3209,7 +3257,7 @@
           h('h2', null, 'Stock they hold'),
           table(
             [
-              { label: 'Campaign', render: (x) => h('div', null, x.campaign_name, x.campaign_status === 'active' ? null : [' ', badge(x.campaign_status)]) },
+              { label: 'Campaign', render: (x) => h('div', null, campaignTag(x.campaign_name, x.campaign_colour), x.campaign_status === 'active' ? null : [' ', badge(x.campaign_status)]) },
               { label: 'Product', render: (x) => h('div', null, x.product_name, h('div', { class: 'small muted mono' }, x.sku)) },
               { label: 'Qty', num: true, render: (x) => num(x.qty) },
             ],
@@ -3412,7 +3460,6 @@
             { label: 'Expires', render: (x) => fmtDate(x.expiry_date), class: 'nowrap' },
             { label: 'Status', render: (x) => daysBadge(x.days_left) },
             { label: 'Qty', num: true, render: (x) => num(x.qty) },
-            canSeeCost() ? { label: 'Value', num: true, render: (x) => money(x.qty * x.unit_cost) } : null,
           ].filter(Boolean),
           rows,
           { empty: 'Nothing expires in this period', rowClass: (x) => (x.days_left < 0 ? 'low' : '') },
@@ -3512,7 +3559,6 @@
     const colours = input({ placeholder: 'Comma separated, e.g. Black, White' });
     const genderBoxes = ['female', 'male', 'unisex'].map((g) => ({ g, el: input({ type: 'checkbox', checked: g !== 'unisex' }) }));
     const sizeBoxes = sizes.map((sz) => ({ sz, el: input({ type: 'checkbox', checked: ['S', 'M', 'L', 'XL'].includes(sz) }) }));
-    const cost = input({ type: 'number', min: '0', step: '0.01' });
     const reorder = input({ type: 'number', min: '0', step: '1', value: 3 });
     const preview = h('div', { class: 'hint' });
     const update = () => {
@@ -3532,7 +3578,6 @@
         field('Colours', colours),
         field('Cut', h('div', { class: 'checks' }, genderBoxes.map((b) => h('label', { class: 'check' }, b.el, GENDER_NAMES[b.g])))),
         field('Sizes', h('div', { class: 'checks' }, sizeBoxes.map((b) => h('label', { class: 'check' }, b.el, b.sz))), { full: true }),
-        field('Unit cost (R)', cost),
         field('Reorder level (each)', reorder),
         h('div', { class: 'field full' }, preview),
       ),
@@ -3547,7 +3592,6 @@
           colours: colours.value,
           genders: genderBoxes.filter((b) => b.el.checked).map((b) => b.g),
           sizes: sizeBoxes.filter((b) => b.el.checked).map((b) => b.sz),
-          unit_cost: cost.value,
           reorder_level: reorder.value,
         });
         invalidate('products');
@@ -3598,18 +3642,24 @@
   // ------------------------------------------------------------------ QR labels & badges
 
   routes.labels = async () => {
-    const [prods, batches] = await Promise.all([get('/products'), get('/stock/expiry?days=3650')]);
+    const [prods, batches, camps] = await Promise.all([get('/products'), get('/stock/expiry?days=3650'), get('/campaigns')]);
+    const running = camps.filter((c) => ['planned', 'active'].includes(c.status) && c.colour);
+    const shelfOf = new Map(prods.map((p) => [p.id, p]));
     const search = input({ type: 'search', placeholder: 'Filter products…' });
+    const campSel = select(running.map((c) => ({ value: c.id, label: `${colourName(c.colour)} · ${c.name}` })), {}, 'All campaigns');
     const copies = new Map();
     const batchPick = new Map();
+    const signPick = new Set();
     const list = h('div');
     const draw = () => {
       const q = search.value.toLowerCase();
-      const rows = prods.filter((p) => !q || `${p.sku} ${p.name} ${p.client_name}`.toLowerCase().includes(q));
+      const rows = prods.filter(
+        (p) => (!q || `${p.sku} ${p.name} ${p.client_name}`.toLowerCase().includes(q)) && (!campSel.value || String(p.campaign_id) === campSel.value),
+      );
       list.replaceChildren(
         table(
           [
-            { label: 'Product', render: (x) => h('div', null, x.name, h('div', { class: 'small muted' }, `${x.sku} · ${x.client_name}`)) },
+            { label: 'Product', render: (x) => h('div', null, x.name, h('div', { class: 'small muted' }, `${x.sku} · ${x.client_name}`), shelfTag(x)) },
             { label: 'Category', key: 'category' },
             {
               label: 'Labels',
@@ -3622,10 +3672,12 @@
             },
           ],
           rows,
+          { empty: 'No products match' },
         ),
       );
     };
     search.addEventListener('input', draw);
+    campSel.addEventListener('change', draw);
     draw();
     const batchList = batches.length
       ? table(
@@ -3637,21 +3689,57 @@
           batches,
         )
       : h('div', { class: 'muted small' }, 'No dated batches in stock');
-    const sheet = h('div', { class: 'label-sheet print-area' });
+    const signList = running.length
+      ? h('div', { class: 'checks' }, running.map((c) => {
+          const box = input({ type: 'checkbox' });
+          box.addEventListener('change', () => (box.checked ? signPick.add(c.id) : signPick.delete(c.id)));
+          return h('label', { class: 'check' }, box, campaignTag(c.name, c.colour));
+        }))
+      : h('div', { class: 'muted small' }, 'No running campaigns with a colour');
+    const sheet = h('div', { class: 'print-area' });
     const build = () => {
       const labels = [];
-      for (const p of prods) for (let i = 0; i < (copies.get(p.id) || 0); i++) labels.push({ code: `JRP:${p.sku}`, sku: p.sku, name: p.name, extra: [p.client_name, p.bin].filter(Boolean).join(' · ') });
-      for (const b of batchPick.values()) for (let i = 0; i < b.n; i++) labels.push({ code: `JRP:${b.sku}:${b.batch_no}`, sku: b.sku, name: b.product_name, extra: `Batch ${b.batch_no} · EXP ${b.expiry_date}` });
-      if (!labels.length) return toast('Enter how many labels you need', 'error');
+      const shelf = (productId) => shelfOf.get(productId) || {};
+      for (const p of prods) {
+        for (let i = 0; i < (copies.get(p.id) || 0); i++) {
+          labels.push({ code: `JRP:${p.sku}`, sku: p.sku, name: p.name, extra: p.client_name, colour: p.shelf_colour, campaign: p.shelf_campaign });
+        }
+      }
+      for (const b of batchPick.values()) {
+        const p = shelf(b.product_id);
+        for (let i = 0; i < b.n; i++) labels.push({ code: `JRP:${b.sku}:${b.batch_no}`, sku: b.sku, name: b.product_name, extra: `Batch ${b.batch_no} · EXP ${b.expiry_date}`, colour: p.shelf_colour, campaign: p.shelf_campaign });
+      }
+      const signs = running.filter((c) => signPick.has(c.id));
+      if (!labels.length && !signs.length) return toast('Choose labels or shelf signs to print', 'error');
       if (labels.length > 600) return toast('That is a lot of labels; print in batches of 600 or less', 'error');
-      sheet.replaceChildren(...labels.map((l) => h('div', { class: 'qr-label' }, qrImg(l.code, 96), h('div', null, h('div', { class: 'mono' }, l.sku), h('div', { class: 'label-name' }, l.name), h('div', { class: 'small' }, l.extra)))));
+      sheet.replaceChildren();
+      append(
+        sheet,
+        labels.length
+          ? h('div', { class: 'label-sheet' }, labels.map((l) =>
+              h('div', { class: `qr-label${l.colour ? ' banded' : ''}`, style: l.colour ? `--c:${colourHex(l.colour)}` : null },
+                qrImg(l.code, 96),
+                h('div', null, h('div', { class: 'mono' }, l.sku), h('div', { class: 'label-name' }, l.name), h('div', { class: 'small' }, l.extra), l.colour ? h('div', { class: 'label-band' }, `${colourName(l.colour)} · ${l.campaign || ''}`) : null),
+              )))
+          : null,
+        signs.map((c) =>
+          h('div', { class: 'shelf-sign', style: `--c:${colourHex(c.colour)}` },
+            h('div', { class: 'shelf-sign-band' }, `${colourName(c.colour).toUpperCase()} SHELF`),
+            h('div', { class: 'shelf-sign-body' }, h('div', null, h('div', { class: 'shelf-sign-name' }, c.name), h('div', null, c.client_name), h('div', { class: 'small' }, `${fmtDate(c.start_date)} – ${fmtDate(c.end_date)}`)), qrImg(`JRC:${c.id}`, 130)))),
+      );
       setTimeout(() => window.print(), 300);
     };
     return page(
-      'QR labels',
-      [h('button', { onclick: build }, 'Print labels')],
+      'QR labels & shelf signs',
+      [h('button', { onclick: build }, 'Print')],
       h('div', { class: 'no-print' },
-        h('div', { class: 'card' }, h('p', { class: 'muted small', style: 'margin-top:0' }, 'Print QR labels for shelves, boxes and individual items. Scanning a label opens the product, adds it when receiving, and ticks it off when picking. Prints 3 across on A4 (fits 63×38 mm label sheets).'), h('div', { class: 'filters' }, search), list),
+        h('div', { class: 'card' },
+          h('h2', null, 'Product labels'),
+          h('p', { class: 'muted small', style: 'margin-top:0' }, 'QR labels for shelves, boxes and items. Labels for products tagged to a campaign get that campaign’s colour band. Scanning a label opens the product, adds it when receiving, and ticks it off when picking. Prints 3 across on A4 (fits 63×38 mm label sheets).'),
+          h('div', { class: 'filters' }, search, campSel),
+          list,
+        ),
+        h('div', { class: 'card' }, h('h2', null, 'Shelf signs'), h('p', { class: 'muted small', style: 'margin-top:0' }, 'A full-width coloured sign for the end of each campaign’s shelf. Scanning its QR opens the campaign.'), signList),
         h('div', { class: 'card' }, h('h2', null, 'Batch labels (dated stock)'), batchList),
       ),
       sheet,
@@ -3705,6 +3793,54 @@
 
   // ------------------------------------------------------------------ campaign stock plan
 
+  /** Where this campaign's stock sits, plus a printable coloured shelf sign. */
+  function shelfCard(c) {
+    const sign = h('div', { class: 'print-area' });
+    const printSign = () => {
+      sign.replaceChildren(
+        h(
+          'div',
+          { class: 'shelf-sign', style: `--c:${colourHex(c.colour)}` },
+          h('div', { class: 'shelf-sign-band' }, `${colourName(c.colour).toUpperCase()} SHELF`),
+          h('div', { class: 'shelf-sign-body' }, h('div', null, h('div', { class: 'shelf-sign-name' }, c.name), h('div', null, c.client_name), h('div', { class: 'small' }, `${fmtDate(c.start_date)} – ${fmtDate(c.end_date)}`)), qrImg(`JRC:${c.id}`, 130)),
+        ),
+      );
+      setTimeout(() => window.print(), 300);
+    };
+    return h(
+      'div',
+      { class: 'card' },
+      h('div', { class: 'page-head', style: 'margin-bottom:8px' }, h('h2', { style: 'margin:0' }, h('span', { class: 'camp-tag' }, swatch(c.colour, 18), `On the ${colourName(c.colour).toLowerCase() || 'campaign'} shelf`)), h('div', { style: 'display:flex;gap:6px' },
+        isApprover() || role() === 'account_manager' ? h('button', { class: 'secondary small', onclick: () => changeColour(c) }, 'Change colour') : null,
+        c.colour && isOps() ? h('button', { class: 'secondary small', onclick: printSign }, 'Print shelf sign') : null)),
+      h('p', { class: 'muted small', style: 'margin-top:0' }, 'Products tagged to this campaign and where they are. Tag products from the product screen or when receiving stock.'),
+      table(
+        [
+          { label: 'Product', render: (x) => h('div', null, x.name, h('div', { class: 'small muted' }, `${x.sku} · ${x.category}`)) },
+          { label: 'Warehouse', key: 'warehouse_name' },
+          { label: 'Bin', render: (x) => h('span', { class: 'mono' }, x.bin || '—') },
+          { label: 'Qty', num: true, render: (x) => num(x.qty) },
+        ],
+        c.shelved || [],
+        { empty: 'No stock tagged to this campaign yet' },
+      ),
+      sign,
+    );
+  }
+
+  function changeColour(c) {
+    const picker = colourPicker(c.colour);
+    const save = h('button', null, 'Save colour');
+    const m = modal(`Shelf colour · ${c.name}`, h('div', null, h('p', { class: 'muted', style: 'margin-top:0' }, 'Remember to re-tape the shelf and reprint its sign and labels.'), picker.el), [save]);
+    save.onclick = () =>
+      busy(save, async () => {
+        await put(`/campaigns/${c.id}/colour`, { colour: picker.value() });
+        m.close();
+        toast('Shelf colour changed', 'ok');
+        render();
+      });
+  }
+
   function planCard(c, canManage) {
     const rows = c.plan || [];
     return h(
@@ -3748,6 +3884,336 @@
         m.close();
         toast('Plan saved', 'ok');
         render();
+      });
+  }
+
+  // ------------------------------------------------------------------ setups & strike downs
+
+  const SETUP_STATUS = {
+    scheduled: ['planned', 'Scheduled'],
+    loaded: ['approved', 'Loaded out'],
+    set_up: ['active', 'Set up'],
+    struck: ['picking', 'Struck down'],
+    returned: ['completed', 'Back in warehouse'],
+    cancelled: ['cancelled', 'Cancelled'],
+  };
+  const setupBadge = (st) => badge(SETUP_STATUS[st][0], SETUP_STATUS[st][1]);
+  /** Setup times are local SA times stored as "YYYY-MM-DDTHH:MM". */
+  const parseLocal = (s) => {
+    const [d, t = '00:00'] = s.split('T');
+    const [y, m, dd] = d.split('-').map(Number);
+    const [hh, mm] = t.split(':').map(Number);
+    return new Date(y, m - 1, dd, hh, mm);
+  };
+  const fmtLocal = (s) => (s ? parseLocal(s).toLocaleString('en-ZA', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—');
+  const fmtTime = (s) => parseLocal(s).toLocaleTimeString('en-ZA', { hour: '2-digit', minute: '2-digit' });
+  const mapSearch = (q) => h('a', { href: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`, target: '_blank', rel: 'noopener', class: 'geo-link' }, '📍 Directions');
+  const canPlanSetups = () => isApprover() || role() === 'account_manager';
+
+  function dayLabel(dateStr) {
+    const d = parseLocal(`${dateStr}T00:00`);
+    const t = parseLocal(`${today()}T00:00`);
+    const diff = Math.round((d - t) / 864e5);
+    if (diff < 0) return 'Overdue';
+    if (diff === 0) return 'Today';
+    if (diff === 1) return 'Tomorrow';
+    return d.toLocaleDateString('en-ZA', { weekday: 'long', day: 'numeric', month: 'long' });
+  }
+
+  routes.setups = async (id) => {
+    if (id) return setupDetail(id);
+    let when = 'upcoming';
+    const tabs = h('div', { class: 'tabs' });
+    const out = h('div');
+    const load = async () => {
+      tabs.replaceChildren(...[['upcoming', 'Agenda'], ['done', 'Done'], ['all', 'All']].map(([k, label]) => h('button', { class: k === when ? 'active' : null, onclick: () => { when = k; load(); } }, label)));
+      const rows = await get(`/setups${qs({ when })}`);
+      if (when !== 'upcoming') {
+        out.replaceChildren(
+          table(
+            [
+              { label: 'Ref', render: (x) => h('span', { class: 'mono' }, x.ref) },
+              { label: 'Campaign', render: (x) => campaignTag(x.campaign_name, x.campaign_colour) },
+              { label: 'Venue', render: (x) => h('div', null, x.venue, h('div', { class: 'small muted' }, x.address || '')) },
+              { label: 'Setup', render: (x) => fmtLocal(x.setup_at), class: 'nowrap' },
+              { label: 'Strike down', render: (x) => fmtLocal(x.strike_at), class: 'nowrap' },
+              { label: 'Crew lead', key: 'lead_name' },
+              { label: 'Status', render: (x) => setupBadge(x.status) },
+            ],
+            rows,
+            { onRow: (x) => go(`setups/${x.id}`), empty: 'Nothing here' },
+          ),
+        );
+        return;
+      }
+      // Agenda: every setup and strike down as its own event, grouped by day
+      const now = new Date();
+      const events = [];
+      for (const s of rows) {
+        if (s.status === 'scheduled' || s.status === 'loaded') events.push({ kind: 'setup', at: s.setup_at, s });
+        if (s.strike_at && ['scheduled', 'loaded', 'set_up'].includes(s.status)) events.push({ kind: 'strike', at: s.strike_at, s });
+        if (s.status === 'struck') events.push({ kind: 'return', at: s.strike_at || s.setup_at, s });
+      }
+      events.sort((a, b) => a.at.localeCompare(b.at));
+      const groups = new Map();
+      for (const e of events) {
+        const overdue = parseLocal(e.at) < now && e.at.slice(0, 10) < today();
+        const key = overdue ? 'Overdue' : dayLabel(e.at.slice(0, 10));
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(e);
+      }
+      const label = { setup: 'Set up', strike: 'Strike down', return: 'Bring back & check in' };
+      out.replaceChildren(
+        ...(events.length
+          ? [...groups].map(([day, list]) =>
+              h(
+                'div',
+                { class: `agenda-day${day === 'Overdue' ? ' overdue' : ''}` },
+                h('h3', null, day),
+                h(
+                  'div',
+                  { class: 'list' },
+                  list.map((e) =>
+                    h(
+                      'div',
+                      { class: `list-item clickable agenda-item ${e.kind}`, style: `--c:${colourHex(e.s.campaign_colour)}`, onclick: () => go(`setups/${e.s.id}`) },
+                      h('div', { class: 'agenda-time' }, fmtTime(e.at), h('div', { class: `agenda-kind ${e.kind}` }, label[e.kind])),
+                      h(
+                        'div',
+                        { style: 'flex:1;min-width:0' },
+                        h('strong', null, e.s.venue),
+                        h('div', { class: 'small' }, campaignTag(e.s.campaign_name, e.s.campaign_colour)),
+                        h('div', { class: 'small muted' }, `${e.s.ref} · Lead: ${e.s.lead_name}${e.s.crew_names ? ` + ${e.s.crew_names}` : ''} · ${num(e.s.units)} items from ${e.s.warehouse_name}`),
+                      ),
+                      setupBadge(e.s.status),
+                    ),
+                  ),
+                ),
+              ),
+            )
+          : [h('div', { class: 'empty' }, 'No setups or strike downs coming up')]),
+      );
+    };
+    await load();
+    return page(
+      'Setups & strike downs',
+      [canPlanSetups() ? h('button', { onclick: () => setupForm() }, 'Book a setup') : null],
+      h('div', { class: 'card' }, h('p', { class: 'muted small', style: 'margin-top:0' }, 'Where gazebos, backwalls, pull-up banners and tables need to be built and taken down. Equipment goes out against the crew lead and is checked back in after the strike down.'), tabs, out),
+    );
+  };
+
+  async function setupDetail(id) {
+    const s = await get(`/setups/${id}`);
+    const reload = () => render();
+    const order = ['scheduled', 'loaded', 'set_up', 'struck', 'returned'];
+    const idx = order.indexOf(s.status);
+    const stages = [
+      ['Scheduled', null, null],
+      ['Loaded out', s.loaded_by_name, s.loaded_at],
+      ['Set up', s.set_up_by_name, s.set_up_at, s.set_up_lat !== null ? { lat: s.set_up_lat, lng: s.set_up_lng } : null],
+      ['Struck down', s.struck_by_name, s.struck_at, s.struck_lat !== null ? { lat: s.struck_lat, lng: s.struck_lng } : null],
+      ['Back in warehouse', s.returned_by_name, s.returned_at],
+    ];
+    const timeline = s.status === 'cancelled'
+      ? h('div', { class: 'steps' }, h('span', { class: 'current' }, 'Cancelled'))
+      : h('div', { class: 'stage-list' }, stages.map(([label, who, at, geo], i) =>
+          h('div', { class: `stage${i < idx ? ' done' : i === idx ? ' current' : ''}` },
+            h('div', { class: 'stage-dot' }),
+            h('div', null, h('strong', null, label), who ? h('div', { class: 'small muted' }, `${who}, ${fmtDateTime(at)}`) : null, geo ? h('div', { class: 'small' }, geoLink(geo, '📍 Where it was confirmed')) : null))));
+
+    const returnInputs = new Map();
+    const returning = s.can_return;
+    const items = table(
+      [
+        { label: 'Equipment', render: (x) => h('div', null, x.product_name, h('div', { class: 'small muted' }, `${x.sku} · ${x.category}`)) },
+        isOps() ? { label: 'Shelf', render: (x) => h('span', { class: 'nowrap' }, swatch(x.shelf_colour, 16), ' ', h('span', { class: 'mono' }, x.bin || '—')) } : null,
+        s.status === 'scheduled' && isOps() ? { label: `In ${s.warehouse_name}`, num: true, render: (x) => h('span', { class: x.warehouse_qty < x.qty ? 'text-danger' : '' }, num(x.warehouse_qty)) } : null,
+        { label: 'Needed', num: true, render: (x) => num(x.qty) },
+        { label: 'Out', num: true, render: (x) => (x.qty_out === null ? '—' : num(x.qty_out)) },
+        {
+          label: 'Back (good)',
+          num: true,
+          render: (x) => {
+            if (!returning) return x.qty_good === null ? '—' : num(x.qty_good);
+            const good = input({ type: 'number', min: '0', value: x.qty_out, style: 'width:80px' });
+            const bad = input({ type: 'number', min: '0', value: 0, style: 'width:80px' });
+            returnInputs.set(x.id, { good, bad });
+            return good;
+          },
+        },
+        { label: 'Damaged', num: true, render: (x) => (returning ? returnInputs.get(x.id).bad : x.qty_damaged === null ? '—' : num(x.qty_damaged)) },
+      ].filter(Boolean),
+      s.items,
+    );
+
+    const actions = h('div', { class: 'no-print', style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;align-items:center' });
+    const where = s.can_mark ? locationTag() : null;
+    if (s.can_load) {
+      const btn = h('button', { class: 'ok' }, 'Load out (equipment leaves the warehouse)');
+      btn.onclick = () => busy(btn, async () => { await post(`/setups/${s.id}/load`); toast(`${s.ref} loaded out to ${s.lead_name}`, 'ok'); reload(); });
+      append(actions, btn, h('button', { class: 'secondary', onclick: () => window.print() }, 'Print load sheet'));
+    }
+    if (s.can_mark && s.status === 'loaded') {
+      const btn = h('button', { class: 'ok' }, 'Setup is done');
+      btn.onclick = () => busy(btn, async () => { await post(`/setups/${s.id}/set-up`, { location: (await where.value()) || undefined }); toast('Marked as set up. Add a photo of the setup below.', 'ok'); reload(); });
+      append(actions, btn);
+    }
+    if (s.can_mark && ['loaded', 'set_up'].includes(s.status)) {
+      const btn = h('button', { class: s.status === 'set_up' ? 'ok' : 'secondary' }, 'Strike down is done');
+      btn.onclick = () => busy(btn, async () => {
+        if (!confirm('Confirm everything has been taken down and packed?')) return;
+        await post(`/setups/${s.id}/strike`, { location: (await where.value()) || undefined });
+        toast('Marked as struck down. Bring the equipment back to the warehouse.', 'ok');
+        reload();
+      });
+      append(actions, btn);
+    }
+    if (returning) {
+      const btn = h('button', { class: 'ok' }, 'Check equipment back in');
+      btn.onclick = () => busy(btn, async () => {
+        await post(`/setups/${s.id}/return`, { items: [...returnInputs].map(([itemId, i]) => ({ id: itemId, qty_good: i.good.value, qty_damaged: i.bad.value })) });
+        toast(`${s.ref} checked back in`, 'ok');
+        invalidate('products');
+        reload();
+      });
+      append(actions, btn);
+    }
+    if (s.can_plan) {
+      append(
+        actions,
+        h('button', { class: 'secondary', onclick: () => setupForm(s) }, 'Edit'),
+        h('button', { class: 'secondary', onclick: (e) => busy(e.target, async () => { if (!confirm(`Cancel ${s.ref}?`)) return; await post(`/setups/${s.id}/cancel`); reload(); }) }, 'Cancel setup'),
+      );
+    }
+
+    return page(
+      h('span', null, h('span', { class: 'mono' }, s.ref), ' ', setupBadge(s.status)),
+      [h('a', { class: 'btn secondary', href: '#/setups' }, '← Setups')],
+      h(
+        'div',
+        { class: 'card setup-head', style: `--c:${colourHex(s.campaign_colour)}` },
+        h(
+          'div',
+          { class: 'grid two' },
+          h(
+            'dl',
+            { class: 'dl' },
+            h('dt', null, 'Campaign'), h('dd', null, campaignTag(s.campaign_name, s.campaign_colour), ` · ${s.client_name}`),
+            h('dt', null, 'Venue'), h('dd', null, h('strong', null, s.venue), s.address ? h('div', null, s.address, ' ', mapSearch(s.address)) : null),
+            s.contact ? [h('dt', null, 'On-site contact'), h('dd', null, s.contact)] : null,
+            h('dt', null, 'From'), h('dd', null, s.warehouse_name),
+          ),
+          h(
+            'dl',
+            { class: 'dl' },
+            h('dt', null, 'Set up'), h('dd', null, h('strong', null, fmtLocal(s.setup_at))),
+            h('dt', null, 'Strike down'), h('dd', null, h('strong', null, fmtLocal(s.strike_at))),
+            h('dt', null, 'Crew lead'), h('dd', null, s.lead_name, s.lead_phone ? ` · ${s.lead_phone}` : ''),
+            s.crew.length ? [h('dt', null, 'Crew'), h('dd', null, s.crew.map((c) => c.name).join(', '))] : null,
+            s.notes ? [h('dt', null, 'Notes'), h('dd', null, s.notes)] : null,
+          ),
+        ),
+      ),
+      h('div', { class: 'card' }, h('h2', null, 'Progress'), timeline, where ? where.el : null, actions),
+      h('div', { class: 'card' }, h('h2', null, 'Equipment'), items, returning ? h('p', { class: 'hint' }, 'Anything not counted back stays against the crew lead and shows on Reminders.') : null),
+      h('div', { class: 'card no-print' }, attachmentsPanel({ kind: 'setup', setup_id: s.id }, s.attachments, {
+        canUpload: isOps() || s.can_mark || s.lead_id === state.user.id,
+        title: 'Setup photos',
+        emptyText: 'No photos yet. Take one when the setup is built, and of any damage.',
+      })),
+    );
+  }
+
+  async function setupForm(existing) {
+    const [camps, whs, kits, users] = await busy(null, () => Promise.all([myCampaignOptions(), warehouses(), get('/kits'), get('/users')])) || [];
+    if (!camps) return;
+    if (!camps.length) return toast('There are no active campaigns you can book setups for', 'error');
+    const crewPool = users.filter((u) => u.active && ['promoter', 'warehouse', 'warehouse_manager'].includes(u.role));
+    const e = existing || {};
+    const campSel = select(camps.map((c) => ({ value: c.id, label: `${colourName(c.colour)} · ${c.name}` })), { value: e.campaign_id || '' }, 'Choose campaign…');
+    const whSel = select(whs.filter((w) => w.active).map((w) => ({ value: w.id, label: w.name })), { value: e.warehouse_id || state.user.warehouse_id || '' }, 'Equipment from…');
+    const venue = input({ value: e.venue || '', placeholder: 'e.g. Checkers Hyper Sandton City' });
+    const address = input({ value: e.address || '', placeholder: 'Street address for the crew' });
+    const contact = input({ value: e.contact || '', placeholder: 'Centre management / on-site contact' });
+    const setupAt = input({ type: 'datetime-local', value: e.setup_at || '' });
+    const strikeAt = input({ type: 'datetime-local', value: e.strike_at || '' });
+    const lead = select(crewPool.map((u) => ({ value: u.id, label: `${u.name} (${ROLE_NAMES[u.role]})` })), { value: e.lead_id || '' }, 'Choose crew lead…');
+    const crewNow = new Set((e.crew || []).map((c) => c.id));
+    const crewBoxes = crewPool.map((u) => ({ u, el: input({ type: 'checkbox', checked: crewNow.has(u.id) }) }));
+    const notes = h('textarea', { placeholder: 'Access times, parking, power, anything the crew must know' }, e.notes || '');
+    const linesWrap = h('div', null, h('div', { class: 'muted small' }, 'Choose a campaign to pick equipment'));
+    const kitSel = select([], {}, '+ Add a kit…');
+    let lines = null;
+    const loadProducts = async () => {
+      if (!campSel.value) return;
+      const prods = await get(`/campaigns/${campSel.value}/products`);
+      const setupFirst = ['Gazebo', 'Backwall Banner', 'Pull-up Banner', 'Promoter Table', 'Setup & Display', 'Equipment'];
+      prods.sort((a, b) => (setupFirst.indexOf(a.category) + 99) % 99 - (setupFirst.indexOf(b.category) + 99) % 99 || a.name.localeCompare(b.name));
+      const hint = (p) => {
+        const a = p.availability.find((x) => String(x.warehouse_id) === whSel.value);
+        return whSel.value ? `${num(a ? a.available : 0)} free in this warehouse` : '';
+      };
+      lines = linesEditor(prods.map((p) => ({ id: p.id, label: `${p.sku} · ${p.name}`, group: p.category, hint: hint(p) })), {
+        initial: existing && String(existing.campaign_id) === campSel.value ? existing.items.map((i) => ({ product_id: i.product_id, qty: i.qty })) : [],
+      });
+      whSel.onchange = () => lines.el.refreshHints((p) => hint(prods.find((x) => x.id === p.id)));
+      const ids = new Set(prods.map((p) => p.id));
+      kitSel.replaceChildren(h('option', { value: '' }, '+ Add a kit…'), ...kits.filter((k) => k.items.every((i) => ids.has(i.product_id))).map((k) => h('option', { value: k.id }, k.name)));
+      linesWrap.replaceChildren(lines.el);
+    };
+    kitSel.addEventListener('change', () => {
+      const kit = kits.find((k) => String(k.id) === kitSel.value);
+      kitSel.value = '';
+      if (kit && lines) kit.items.forEach((i) => lines.add({ product_id: i.product_id, qty: i.qty }));
+    });
+    campSel.addEventListener('change', loadProducts);
+    await loadProducts();
+    const save = h('button', null, existing ? 'Save setup' : 'Book setup');
+    const m = modal(
+      existing ? `Edit ${existing.ref}` : 'Book a setup',
+      h(
+        'div',
+        null,
+        h(
+          'div',
+          { class: 'form-grid' },
+          field('Campaign', campSel),
+          field('Equipment from', whSel),
+          field('Venue', venue),
+          field('Address', address),
+          field('Set up (date & time)', setupAt),
+          field('Strike down (date & time)', strikeAt),
+          field('On-site contact', contact),
+          field('Crew lead', lead, { hint: 'Signs for the equipment; it’s held against them until it’s back' }),
+          field('Crew', h('div', { class: 'checks' }, crewBoxes.map((b) => h('label', { class: 'check' }, b.el, b.u.name))), { full: true }),
+        ),
+        h('div', { class: 'page-head', style: 'margin:16px 0 8px' }, h('h3', { style: 'margin:0' }, 'Equipment'), h('div', { style: 'max-width:260px' }, kitSel)),
+        linesWrap,
+        h('div', { style: 'margin-top:12px' }, field('Notes', notes)),
+      ),
+      [save],
+      { wide: true },
+    );
+    save.onclick = () =>
+      busy(save, async () => {
+        if (!lines) throw new Error('Choose a campaign first');
+        const body = {
+          campaign_id: campSel.value,
+          warehouse_id: whSel.value,
+          venue: venue.value,
+          address: address.value,
+          contact: contact.value,
+          setup_at: setupAt.value,
+          strike_at: strikeAt.value,
+          lead_id: lead.value,
+          crew_ids: crewBoxes.filter((b) => b.el.checked).map((b) => b.u.id),
+          notes: notes.value,
+          items: lines.values().map((l) => ({ product_id: l.product_id, qty: l.qty })),
+        };
+        const res = existing ? await put(`/setups/${existing.id}`, body) : await post('/setups', body);
+        m.close();
+        toast(existing ? 'Setup saved' : `${res.ref} booked`, 'ok');
+        go(`setups/${res.id}`);
       });
   }
 

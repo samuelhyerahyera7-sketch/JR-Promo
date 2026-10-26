@@ -11,6 +11,7 @@ const { tx } = require('../db');
  *   JRP:<SKU>[:<batch>]  product label (optionally a specific batch)
  *   JRU:<badge code>     promoter ID badge
  *   JRR:<request ref>    picking slip / stock request
+ *   JRC:<campaign id>    campaign shelf sign
  * Plain SKUs, barcodes and REQ-/RET- references are recognised too, so
  * ordinary handheld barcode scanners work as well.
  */
@@ -43,6 +44,12 @@ function qrRoutes(db) {
       if (!promoter) throw new HttpError(404, 'Unknown or replaced promoter badge');
       if (!promoter.active) throw new HttpError(409, `${promoter.name}'s account is deactivated`);
       return res.json({ kind: 'promoter', promoter });
+    }
+
+    if (prefix === 'JRC') {
+      const campaign = db.prepare('SELECT id, name FROM campaigns WHERE id = ?').get(Number(a));
+      if (!campaign) throw new HttpError(404, 'Unknown campaign sign');
+      return res.json({ kind: 'campaign', id: campaign.id, name: campaign.name });
     }
 
     const findProduct = (sku) => db.prepare('SELECT id, sku, name, category FROM products WHERE sku = ?').get(sku);

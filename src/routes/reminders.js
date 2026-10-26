@@ -299,6 +299,49 @@ function buildReminders(db, user) {
     }
   }
 
+  // ---- setups & strike downs ----------------------------------------------
+  {
+    // Times are entered as SA local time (YYYY-MM-DDTHH:MM)
+    const nowLocal = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Africa/Johannesburg', dateStyle: 'short', timeStyle: 'short' })
+      .format(new Date())
+      .replace(' ', 'T');
+    const tomorrowEnd = `${saToday(1)}T23:59`;
+    const where = mgmt || ops ? '1=1' : am ? 'c.account_manager_id = ?' : '(st.lead_id = ? OR EXISTS (SELECT 1 FROM setup_crew sc WHERE sc.setup_id = st.id AND sc.user_id = ?))';
+    const params = mgmt || ops ? [] : am ? [user.id] : [user.id, user.id];
+    const rows = db
+      .prepare(
+        `SELECT st.id, st.ref, st.venue, st.setup_at, st.strike_at, st.status, st.struck_at, c.name AS campaign_name
+         FROM setups st JOIN campaigns c ON c.id = st.campaign_id
+         WHERE st.status NOT IN ('returned','cancelled') AND ${where}`,
+      )
+      .all(...params);
+    const when = (t) => t.replace('T', ' ');
+    for (const s of rows) {
+      const link = `setups/${s.id}`;
+      if (s.status === 'scheduled' && s.setup_at <= tomorrowEnd) {
+        const late = s.setup_at < nowLocal;
+        add({ group: 'out', severity: late || s.setup_at.slice(0, 10) === today ? 'high' : 'medium', type: 'setup_load',
+          title: `${s.ref}: load out for ${s.venue}${late ? ' (setup time has passed)' : ''}`,
+          detail: `${s.campaign_name}. Setup ${when(s.setup_at)}. Equipment hasn't left the warehouse yet.`, link });
+      } else if (s.status === 'loaded' && s.setup_at < nowLocal) {
+        add({ group: 'missing', severity: 'medium', type: 'setup_unconfirmed',
+          title: `${s.ref}: setup at ${s.venue} not confirmed`,
+          detail: `Was due ${when(s.setup_at)}. Ask the crew to mark it as set up (with a photo).`, link });
+      }
+      if (['loaded', 'set_up'].includes(s.status) && s.strike_at && s.strike_at <= tomorrowEnd) {
+        const late = s.strike_at < nowLocal;
+        add({ group: 'out', severity: late || s.strike_at.slice(0, 10) === today ? 'high' : 'medium', type: 'strike_due',
+          title: `${s.ref}: strike down at ${s.venue} ${late ? 'is overdue' : 'is due'}`,
+          detail: `${s.campaign_name}. Strike down ${when(s.strike_at)}.`, link });
+      }
+      if (s.status === 'struck' && s.struck_at && s.struck_at <= new Date(Date.now() - 864e5).toISOString()) {
+        add({ group: 'missing', severity: 'high', type: 'setup_not_back',
+          title: `${s.ref}: equipment from ${s.venue} not back in the warehouse`,
+          detail: `Struck down ${s.struck_at.slice(0, 10)} but not checked in yet.`, link });
+      }
+    }
+  }
+
   // ---- stock counts -------------------------------------------------------
   if (isStockApprover(user)) {
     for (const row of db

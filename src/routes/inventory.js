@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { MANAGEMENT, WAREHOUSE, STOCK_APPROVERS, HttpError, allow, isManagement } = require('../auth');
+const { MANAGEMENT, WAREHOUSE, STOCK_APPROVERS, HttpError, allow } = require('../auth');
 const v = require('../validate');
 const stock = require('../stock');
 const { tx } = require('../db');
@@ -15,6 +15,9 @@ const CATEGORIES = [
   'Merchandise',
   'Uniform',
   'Promoter Table',
+  'Gazebo',
+  'Backwall Banner',
+  'Pull-up Banner',
   'Setup & Display',
   'Equipment',
   'Other',
@@ -37,6 +40,7 @@ function productQuery(user, query) {
   if (query.style) add('p.style = ?', query.style);
   if (query.gender) add('p.gender = ?', query.gender);
   if (query.size) add('p.size = ?', query.size);
+  if (query.campaign_id) add('p.campaign_id = ?', Number(query.campaign_id));
   if (query.q) {
     where.push('(p.sku LIKE ? OR p.name LIKE ? OR p.barcode = ? OR p.colour LIKE ?)');
     params.push(`%${query.q}%`, `%${query.q}%`, query.q, `%${query.q}%`);
@@ -46,7 +50,7 @@ function productQuery(user, query) {
   if (query.low === '1') having = 'HAVING on_hand <= p.reorder_level';
   if (query.expiring === '1') having = 'HAVING expiring > 0 OR expired > 0';
   return {
-    sql: `SELECT p.*, cl.name AS client_name, cl.is_house,
+    sql: `SELECT p.*, cl.name AS client_name, cl.is_house, sc.name AS shelf_campaign, sc.colour AS shelf_colour,
             COALESCE((SELECT SUM(qty) FROM stock s WHERE s.product_id = p.id), 0) AS on_hand,
             COALESCE((SELECT SUM(qty) FROM field_stock f WHERE f.product_id = p.id), 0) AS in_field,
             COALESCE((SELECT SUM(qty) FROM laundry_stock l WHERE l.product_id = p.id), 0) AS in_laundry,
@@ -56,7 +60,7 @@ function productQuery(user, query) {
             COALESCE((SELECT SUM(qty) FROM stock_batches b WHERE b.product_id = p.id
                       AND b.expiry_date >= ?1 AND b.expiry_date <= ?2), 0) AS expiring,
             (SELECT MIN(expiry_date) FROM stock_batches b WHERE b.product_id = p.id AND b.qty > 0 AND b.expiry_date >= ?1) AS next_expiry
-          FROM products p JOIN clients cl ON cl.id = p.client_id
+          FROM products p JOIN clients cl ON cl.id = p.client_id LEFT JOIN campaigns sc ON sc.id = p.campaign_id
           WHERE ${where.join(' AND ')}
           GROUP BY p.id ${having}
           ORDER BY cl.is_house DESC, cl.name, p.style, p.name`,
@@ -76,6 +80,15 @@ function prepareNumbered(db, sql) {
     return `?${n}`;
   });
   return db.prepare(numbered);
+}
+
+/** A product can only be shelved under a campaign of its own client (or any campaign, for company stock). */
+function assertShelfCampaign(db, campaignId, clientId) {
+  if (!campaignId) return;
+  const c = db.prepare('SELECT client_id FROM campaigns WHERE id = ?').get(campaignId);
+  if (!c) throw new HttpError(400, 'Shelf campaign not found');
+  const house = db.prepare('SELECT is_house FROM clients WHERE id = ?').get(clientId);
+  if (c.client_id !== clientId && !(house && house.is_house)) throw new HttpError(400, "That campaign is for a different client");
 }
 
 function productRoutes(db) {
@@ -159,11 +172,12 @@ function productRoutes(db) {
       size: isUniform ? v.str(b.size, 'Size', { max: 10 }) : null,
       colour: isUniform ? v.str(b.colour, 'Colour', { max: 30 }) : null,
       style: v.str(b.style, 'Style / range', { max: 80 }),
+      campaign_id: v.int(b.campaign_id, 'Shelf campaign'),
       tracks_expiry: b.tracks_expiry ? 1 : 0,
       active: b.active === undefined ? 1 : b.active ? 1 : 0,
     };
   };
-  const COLS = ['sku', 'name', 'client_id', 'category', 'unit', 'unit_cost', 'reorder_level', 'barcode', 'gender', 'size', 'colour', 'style', 'tracks_expiry', 'active'];
+  const COLS = ['sku', 'name', 'client_id', 'category', 'unit', 'unit_cost', 'reorder_level', 'barcode', 'gender', 'size', 'colour', 'style', 'campaign_id', 'tracks_expiry', 'active'];
 
   const assertClient = (user, clientId) => {
     const client = v.found(db.prepare('SELECT * FROM clients WHERE id = ?').get(clientId), 'Client');
@@ -180,6 +194,7 @@ function productRoutes(db) {
   r.post('/', allow(MANAGEMENT, 'account_manager', 'warehouse_manager'), (req, res) => {
     const f = fields(req.body);
     assertClient(req.user, f.client_id);
+    assertShelfCampaign(db, f.campaign_id, f.client_id);
     if (db.prepare('SELECT 1 FROM products WHERE sku = ?').get(f.sku)) throw new HttpError(409, `SKU ${f.sku} already exists`);
     const id = insertProduct(f);
     res.status(201).json(db.prepare('SELECT * FROM products WHERE id = ?').get(id));
@@ -227,6 +242,7 @@ function productRoutes(db) {
               size,
               colour,
               style,
+              campaign_id: null,
               tracks_expiry: 0,
               active: 1,
             });
@@ -242,8 +258,10 @@ function productRoutes(db) {
     const id = v.int(req.params.id, 'id', { required: true });
     const existing = v.found(db.prepare('SELECT * FROM products WHERE id = ?').get(id), 'Product');
     assertClient(req.user, existing.client_id);
-    const f = fields(req.body);
+    // Fields the screens don't edit keep their stored values
+    const f = fields({ unit_cost: existing.unit_cost, campaign_id: existing.campaign_id, ...req.body });
     assertClient(req.user, f.client_id);
+    assertShelfCampaign(db, f.campaign_id, f.client_id);
     if (db.prepare('SELECT 1 FROM products WHERE sku = ? AND id != ?').get(f.sku, id)) {
       throw new HttpError(409, `SKU ${f.sku} already exists`);
     }
@@ -313,8 +331,8 @@ function stockRoutes(db) {
     res.json(
       db
         .prepare(
-          `SELECT f.*, p.sku, p.name AS product_name, p.unit_cost, p.category, cl.name AS client_name,
-                  u.name AS promoter_name, u.region, c.name AS campaign_name, c.status AS campaign_status
+          `SELECT f.*, p.sku, p.name AS product_name, p.category, cl.name AS client_name,
+                  u.name AS promoter_name, u.region, c.name AS campaign_name, c.status AS campaign_status, c.colour AS campaign_colour
            FROM field_stock f JOIN products p ON p.id = f.product_id JOIN clients cl ON cl.id = p.client_id
            JOIN users u ON u.id = f.promoter_id JOIN campaigns c ON c.id = f.campaign_id
            WHERE f.qty > 0 AND ${scope.sql} ORDER BY u.name, c.name, p.name`,
@@ -327,9 +345,18 @@ function stockRoutes(db) {
     const warehouseId = v.int(req.body.warehouse_id, 'Warehouse', { required: true });
     const reference = v.str(req.body.reference, 'Reference (GRN / delivery note)', { required: true, max: 80 });
     const note = v.str(req.body.note, 'Note');
+    const campaignId = v.int(req.body.campaign_id, 'Campaign');
     const lines = v.items(req.body.items);
     tx(db, () => {
       for (const line of lines) {
+        // Stock received for a campaign is shelved under that campaign's colour
+        if (campaignId) {
+          const product = db.prepare('SELECT client_id FROM products WHERE id = ?').get(Number(line.product_id));
+          if (product) {
+            assertShelfCampaign(db, campaignId, product.client_id);
+            db.prepare('UPDATE products SET campaign_id = ? WHERE id = ?').run(campaignId, Number(line.product_id));
+          }
+        }
         stock.receive(db, {
           productId: v.int(line.product_id, 'Product', { required: true }),
           warehouseId,
@@ -381,7 +408,7 @@ function stockRoutes(db) {
     res.json(
       db
         .prepare(
-          `SELECT b.*, p.sku, p.name AS product_name, p.unit_cost, cl.name AS client_name, w.name AS warehouse_name,
+          `SELECT b.*, p.sku, p.name AS product_name, cl.name AS client_name, w.name AS warehouse_name,
              CAST(julianday(b.expiry_date) - julianday(?) AS INTEGER) AS days_left
            FROM stock_batches b JOIN products p ON p.id = b.product_id JOIN clients cl ON cl.id = p.client_id
            JOIN warehouses w ON w.id = b.warehouse_id
@@ -484,7 +511,6 @@ function stockRoutes(db) {
   r.get('/levels.csv', allow(STOCK_ROLES), (req, res) => {
     const q = productQuery(req.user, req.query);
     const rows = prepareNumbered(db, q.sql).all(...q.params);
-    const showCost = isManagement(req.user) || req.user.role === 'account_manager';
     const columns = [
       ['SKU', 'sku'],
       ['Product', 'name'],
@@ -500,11 +526,9 @@ function stockRoutes(db) {
       ['Allocated', 'allocated'],
       ['In field', 'in_field'],
       ['Reorder level', 'reorder_level'],
+      ['Shelf campaign', 'shelf_campaign'],
+      ['Shelf colour', 'shelf_colour'],
     ];
-    if (showCost) {
-      for (const row of rows) row.value = (row.on_hand * row.unit_cost).toFixed(2);
-      columns.push(['Unit cost (ZAR)', 'unit_cost'], ['Value (ZAR)', 'value']);
-    }
     sendCsv(res, 'stock-levels.csv', rows, columns);
   });
 

@@ -12,6 +12,7 @@ const { attachmentRoutes, deliveryRoutes } = require('./routes/attachments');
 const { qrRoutes, kitRoutes } = require('./routes/misc');
 const { reminderRoutes } = require('./routes/reminders');
 const { countRoutes, reportRoutes } = require('./routes/counts');
+const { setupRoutes } = require('./routes/setups');
 
 function createApp(db) {
   const app = express();
@@ -51,6 +52,7 @@ function createApp(db) {
   api.use('/reminders', reminderRoutes(db));
   api.use('/counts', countRoutes(db));
   api.use('/reports', reportRoutes(db));
+  api.use('/setups', setupRoutes(db));
   api.use('/', qrRoutes(db));
   app.use('/api', api);
 

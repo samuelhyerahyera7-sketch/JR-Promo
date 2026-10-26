@@ -74,6 +74,7 @@ function seed(db) {
       office: user('Thandi Mokoena', 'office@jrpromo.test', 'office', 'Gauteng', '082 555 0102'),
       am1: user('Lerato Dlamini', 'lerato@jrpromo.test', 'account_manager', 'Gauteng', '083 555 0201'),
       am2: user('Pieter van Wyk', 'pieter@jrpromo.test', 'account_manager', 'Western Cape', '083 555 0202'),
+      whManager: user('Bongani Mthembu', 'manager@jrpromo.test', 'warehouse_manager', 'Gauteng', '084 555 0300', wh.jhb),
       whJhb: user('Sipho Nkosi', 'warehouse@jrpromo.test', 'warehouse', 'Gauteng', '084 555 0301', wh.jhb),
       whCpt: user('Charlene Adams', 'charlene@jrpromo.test', 'warehouse', 'Western Cape', '084 555 0302', wh.cpt),
       whDbn: user('Ashwin Naidoo', 'ashwin@jrpromo.test', 'warehouse', 'KwaZulu-Natal', '084 555 0303', wh.dbn),
@@ -404,6 +405,46 @@ function seed(db) {
     plan(c.juiceDbn, [[p.juiceSample, 1500], [p.juiceCup, 40], [p.gazebo, 1], [p.table, 1], [p.cloth, 1], [polo['m-Black-M'], 2]]);
 
     db.prepare("UPDATE stock SET bin = 'A-' || (product_id % 9 + 1) || '-0' || (product_id % 4 + 1)").run();
+
+    // Stock counts: one finished, one waiting for the manager, open ones on the floor
+    let cnt = 0;
+    const count = ({ warehouseId, counter, kind, daysAgo, lines, status }) => {
+      cnt += 1;
+      const ref = `CNT-${String(cnt).padStart(5, '0')}`;
+      const submitted = status !== 'open' ? stamp(daysAgo, 15).replace(' ', 'T') + '.000Z' : null;
+      const id = ins(
+        `INSERT INTO stock_counts (ref, warehouse_id, kind, status, assigned_to, created_by, created_at, submitted_at, closed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ref, warehouseId, kind, status, counter, u.whManager, stamp(daysAgo, 7), submitted, status === 'closed' ? submitted : null,
+      );
+      const counterName = db.prepare('SELECT name FROM users WHERE id = ?').get(counter).name;
+      for (const [productId, diff] of lines) {
+        const bin = (db.prepare('SELECT bin FROM stock WHERE product_id = ? AND warehouse_id = ?').get(productId, warehouseId) || {}).bin;
+        const cost = db.prepare('SELECT unit_cost FROM products WHERE id = ?').get(productId).unit_cost;
+        if (status === 'open') {
+          ins('INSERT INTO count_lines (count_id, product_id, bin) VALUES (?, ?, ?)', id, productId, bin);
+          continue;
+        }
+        const system = stock.warehouseQty(db, productId, warehouseId);
+        const lineStatus = diff === 0 ? 'matched' : status === 'closed' ? 'auto' : 'pending';
+        ins(
+          `INSERT INTO count_lines (count_id, product_id, bin, counted_qty, system_qty, variance, unit_cost, status, decided_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          id, productId, bin, system + diff, system, diff, cost, lineStatus, lineStatus === 'pending' ? null : submitted,
+        );
+        if (lineStatus === 'auto') {
+          dated(daysAgo, () => stock.adjustBy(db, { productId, warehouseId, delta: diff, reference: ref, note: `Counted by ${counterName}, within tolerance`, userId: counter }));
+        }
+      }
+    };
+    count({ warehouseId: wh.jhb, counter: u.whJhb, kind: 'cycle', daysAgo: 10, status: 'closed',
+      lines: [[p.table, 0], [p.cloth, 0], [p.coffeeMug, -1], [p.juiceAframe, 0], [p.coffeeUrn, 0], [p.cooler, 0]] });
+    count({ warehouseId: wh.jhb, counter: u.whJhb, kind: 'cycle', daysAgo: 1, status: 'submitted',
+      lines: [[p.sauceApron, -6], [p.coffeeWobbler, -40], [p.tableSmall, 0], [p.flag, 0], [p.gazebo, 0]] });
+    count({ warehouseId: wh.jhb, counter: u.whJhb, kind: 'cycle', daysAgo: 0, status: 'open',
+      lines: [[p.mobileCap, null], [p.skinTester, null], [p.sauceSachet, null], [polo['f-Black-M'], null], [polo['m-Black-L'], null], [polo['f-White-S'], null]] });
+    count({ warehouseId: wh.dbn, counter: u.whDbn, kind: 'spot', daysAgo: 0, status: 'open',
+      lines: [[p.sauceTable, null], [p.sauceApron, null], [p.table, null]] });
   });
 }
 

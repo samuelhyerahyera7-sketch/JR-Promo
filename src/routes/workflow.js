@@ -1,13 +1,13 @@
 'use strict';
 
 const express = require('express');
-const { MANAGEMENT, HttpError, allow, isManagement } = require('../auth');
+const { MANAGEMENT, WAREHOUSE, HttpError, allow, isManagement, isWarehouse } = require('../auth');
 const v = require('../validate');
 const stock = require('../stock');
 const { tx } = require('../db');
 const { assertCampaign, canManageCampaign } = require('../access');
 
-const OPERATORS = [MANAGEMENT, 'warehouse'];
+const OPERATORS = [MANAGEMENT, WAREHOUSE];
 
 function nextRef(db, table, prefix) {
   const row = db.prepare(`SELECT COALESCE(MAX(id), 0) + 1 AS n FROM ${table}`).get();
@@ -135,7 +135,7 @@ const REQUEST_SELECT = `
   LEFT JOIN users db_ ON db_.id = r.dispatched_by`;
 
 function requestScope(user) {
-  if (isManagement(user) || user.role === 'warehouse') return { sql: '1=1', params: [] };
+  if (isManagement(user) || isWarehouse(user)) return { sql: '1=1', params: [] };
   if (user.role === 'account_manager') return { sql: 'c.account_manager_id = ?', params: [user.id] };
   return { sql: 'r.promoter_id = ?', params: [user.id] };
 }
@@ -374,7 +374,7 @@ function requestRoutes(db) {
   r.post('/:id/deliver', (req, res) => {
     const request = loadRequest(db, req.user, v.int(req.params.id, 'id', { required: true }));
     const isOwner = req.user.role === 'promoter' && request.promoter_id === req.user.id;
-    if (!isOwner && !isManagement(req.user) && req.user.role !== 'warehouse') {
+    if (!isOwner && !isManagement(req.user) && !isWarehouse(req.user)) {
       throw new HttpError(403, 'Only the receiving promoter or the warehouse can confirm delivery');
     }
     requireStatus(request, ['dispatched'], 'confirm delivery');
@@ -424,7 +424,7 @@ const RETURN_SELECT = `
   LEFT JOIN users rb ON rb.id = rt.received_by`;
 
 function returnScope(user) {
-  if (isManagement(user) || user.role === 'warehouse') return { sql: '1=1', params: [] };
+  if (isManagement(user) || isWarehouse(user)) return { sql: '1=1', params: [] };
   if (user.role === 'account_manager') return { sql: 'c.account_manager_id = ?', params: [user.id] };
   return { sql: 'rt.promoter_id = ?', params: [user.id] };
 }
@@ -525,14 +525,14 @@ function returnRoutes(db) {
   r.get('/:id', (req, res) => res.json(loadReturn(db, req.user, v.int(req.params.id, 'id', { required: true }))));
 
   // Promoters log returns to send back; warehouse staff can take one at the counter and check it in at once
-  r.post('/', allow(MANAGEMENT, 'account_manager', 'promoter', 'warehouse'), (req, res) => {
+  r.post('/', allow(MANAGEMENT, 'account_manager', 'promoter', WAREHOUSE), (req, res) => {
     const b = req.body;
     const campaign = assertCampaign(db, req.user, v.int(b.campaign_id, 'Campaign', { required: true }));
     const promoterId = resolvePromoter(req.user, b.promoter_id);
     const warehouseId = v.int(b.warehouse_id, 'Warehouse', { required: true });
     v.found(db.prepare('SELECT 1 FROM warehouses WHERE id = ? AND active = 1').get(warehouseId), 'Warehouse');
     const receiveNow = !!b.receive_now;
-    if (receiveNow && !isManagement(req.user) && req.user.role !== 'warehouse') {
+    if (receiveNow && !isManagement(req.user) && !isWarehouse(req.user)) {
       throw new HttpError(403, 'Only the warehouse can check returns in');
     }
     const lines = v.items(b.items).map((l) => ({
@@ -586,7 +586,7 @@ function returnRoutes(db) {
 // ---------------------------------------------------------------- handover log & promoter counter
 
 function handoverScope(user) {
-  if (isManagement(user) || user.role === 'warehouse') return { sql: '1=1', params: [] };
+  if (isManagement(user) || isWarehouse(user)) return { sql: '1=1', params: [] };
   if (user.role === 'promoter') return { sql: 'h.promoter_id = ?', params: [user.id] };
   return {
     sql: `EXISTS (SELECT 1 FROM campaigns c WHERE c.account_manager_id = ? AND c.id = COALESCE(rq.campaign_id, rt.campaign_id))`,

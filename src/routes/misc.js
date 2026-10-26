@@ -2,7 +2,7 @@
 
 const express = require('express');
 const QRCode = require('qrcode');
-const { MANAGEMENT, HttpError, allow, isManagement } = require('../auth');
+const { MANAGEMENT, WAREHOUSE, HttpError, allow, isManagement, isWarehouse } = require('../auth');
 const v = require('../validate');
 const { tx } = require('../db');
 
@@ -36,7 +36,7 @@ function qrRoutes(db) {
     const seesStock = user.role !== 'promoter';
 
     if (prefix === 'JRU') {
-      if (!isManagement(user) && user.role !== 'warehouse') throw new HttpError(403, 'Only warehouse and office staff can scan promoter badges');
+      if (!isManagement(user) && !isWarehouse(user)) throw new HttpError(403, 'Only warehouse and office staff can scan promoter badges');
       const promoter = db
         .prepare("SELECT id, name, phone, region, active FROM users WHERE badge_code = ? AND role = 'promoter'")
         .get(a || '');
@@ -109,8 +109,8 @@ function kitRoutes(db) {
     });
   };
 
-  r.post('/', allow(MANAGEMENT, 'warehouse'), (req, res) => res.status(201).json(load(save(req))));
-  r.put('/:id', allow(MANAGEMENT, 'warehouse'), (req, res) => {
+  r.post('/', allow(MANAGEMENT, WAREHOUSE), (req, res) => res.status(201).json(load(save(req))));
+  r.put('/:id', allow(MANAGEMENT, WAREHOUSE), (req, res) => {
     const id = v.int(req.params.id, 'id', { required: true });
     v.found(load(id), 'Kit');
     res.json(load(save(req, id)));

@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { MANAGEMENT, HttpError, allow, isManagement } = require('../auth');
+const { MANAGEMENT, WAREHOUSE, STOCK_APPROVERS, HttpError, allow, isManagement } = require('../auth');
 const v = require('../validate');
 const stock = require('../stock');
 const { tx } = require('../db');
@@ -21,8 +21,8 @@ const CATEGORIES = [
 ];
 const GENDERS = ['female', 'male', 'unisex'];
 const SIZES = ['XS', 'S', 'M', 'L', 'XL', 'XXL', '3XL'];
-const STOCK_ROLES = [MANAGEMENT, 'account_manager', 'warehouse'];
-const OPERATORS = [MANAGEMENT, 'warehouse'];
+const STOCK_ROLES = [MANAGEMENT, 'account_manager', WAREHOUSE];
+const OPERATORS = [MANAGEMENT, WAREHOUSE];
 
 function productQuery(user, query) {
   const scope = clientScope(user);
@@ -177,7 +177,7 @@ function productRoutes(db) {
       .prepare(`INSERT INTO products (${COLS.join(', ')}) VALUES (${COLS.map(() => '?').join(', ')})`)
       .run(...COLS.map((c) => f[c])).lastInsertRowid;
 
-  r.post('/', allow(MANAGEMENT, 'account_manager'), (req, res) => {
+  r.post('/', allow(MANAGEMENT, 'account_manager', 'warehouse_manager'), (req, res) => {
     const f = fields(req.body);
     assertClient(req.user, f.client_id);
     if (db.prepare('SELECT 1 FROM products WHERE sku = ?').get(f.sku)) throw new HttpError(409, `SKU ${f.sku} already exists`);
@@ -189,7 +189,7 @@ function productRoutes(db) {
    * Create a uniform range in one go: every gender x colour x size combination
    * becomes its own SKU, e.g. JRU-POLO-F-BLACK-M.
    */
-  r.post('/range', allow(MANAGEMENT, 'account_manager'), (req, res) => {
+  r.post('/range', allow(MANAGEMENT, 'account_manager', 'warehouse_manager'), (req, res) => {
     const b = req.body;
     const prefix = v.str(b.sku_prefix, 'SKU prefix', { required: true, max: 20 }).toUpperCase().replace(/[^A-Z0-9-]/g, '');
     const style = v.str(b.style, 'Style name', { required: true, max: 80 });
@@ -238,7 +238,7 @@ function productRoutes(db) {
     res.status(201).json({ created, skipped });
   });
 
-  r.put('/:id', allow(MANAGEMENT, 'account_manager'), (req, res) => {
+  r.put('/:id', allow(MANAGEMENT, 'account_manager', 'warehouse_manager'), (req, res) => {
     const id = v.int(req.params.id, 'id', { required: true });
     const existing = v.found(db.prepare('SELECT * FROM products WHERE id = ?').get(id), 'Product');
     assertClient(req.user, existing.client_id);
@@ -392,7 +392,7 @@ function stockRoutes(db) {
     );
   });
 
-  r.post('/write-off-expired', allow(OPERATORS), (req, res) => {
+  r.post('/write-off-expired', allow(STOCK_APPROVERS), (req, res) => {
     const productId = v.int(req.body.product_id, 'Product', { required: true });
     const warehouseId = v.int(req.body.warehouse_id, 'Warehouse', { required: true });
     const units = tx(db, () =>
@@ -432,10 +432,10 @@ function stockRoutes(db) {
     res.json({ ok: true });
   });
 
-  // Stock take: submit counted quantities, system records the variance
-  r.post('/count', allow(OPERATORS), (req, res) => {
+  // Direct correction by a manager (e.g. after an investigation). Day-to-day counting goes through /counts.
+  r.post('/count', allow(STOCK_APPROVERS), (req, res) => {
     const warehouseId = v.int(req.body.warehouse_id, 'Warehouse', { required: true });
-    const note = v.str(req.body.note, 'Note') || 'Stock take';
+    const note = v.str(req.body.note, 'Reason for the correction', { required: true });
     const lines = v.items(req.body.items);
     const variances = tx(db, () =>
       lines.map((line) => {

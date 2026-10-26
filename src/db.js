@@ -324,6 +324,72 @@ const MIGRATIONS = [
   ALTER TABLE attachments ADD COLUMN lng REAL;
   ALTER TABLE attachments ADD COLUMN accuracy REAL;
   `,
+  // v4: warehouse manager role, controlled stock counts (blind counting + approval), settings
+  {
+    // Rebuilding users (to widen the role list) needs foreign key checks off while the table is swapped
+    foreignKeysOff: true,
+    sql: `
+  CREATE TABLE users_v4 (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    phone TEXT,
+    role TEXT NOT NULL CHECK (role IN ('director','office','account_manager','warehouse_manager','warehouse','promoter')),
+    region TEXT,
+    warehouse_id INTEGER REFERENCES warehouses(id),
+    password_hash TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    gender TEXT,
+    uniform_size TEXT,
+    badge_code TEXT
+  );
+  INSERT INTO users_v4 (id, name, email, phone, role, region, warehouse_id, password_hash, active, created_at, gender, uniform_size, badge_code)
+    SELECT id, name, email, phone, role, region, warehouse_id, password_hash, active, created_at, gender, uniform_size, badge_code FROM users;
+  DROP TABLE users;
+  ALTER TABLE users_v4 RENAME TO users;
+  CREATE UNIQUE INDEX idx_users_badge ON users(badge_code);
+
+  CREATE TABLE settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+  -- Count differences within both limits are adjusted automatically; bigger ones wait for a manager
+  INSERT INTO settings (key, value) VALUES ('count_tolerance_units', '2'), ('count_tolerance_value', '200');
+
+  -- A stock count: a list of products in one warehouse, counted blind by one person
+  CREATE TABLE stock_counts (
+    id INTEGER PRIMARY KEY,
+    ref TEXT NOT NULL UNIQUE,
+    warehouse_id INTEGER NOT NULL REFERENCES warehouses(id),
+    kind TEXT NOT NULL DEFAULT 'spot' CHECK (kind IN ('cycle','full','spot')),
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','submitted','closed','cancelled')),
+    assigned_to INTEGER NOT NULL REFERENCES users(id),
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    submitted_at TEXT,
+    closed_at TEXT
+  );
+  CREATE TABLE count_lines (
+    id INTEGER PRIMARY KEY,
+    count_id INTEGER NOT NULL REFERENCES stock_counts(id) ON DELETE CASCADE,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    bin TEXT,
+    counted_qty INTEGER CHECK (counted_qty >= 0),
+    -- system_qty and variance are only filled in when the count is submitted (blind counting)
+    system_qty INTEGER,
+    variance INTEGER,
+    unit_cost REAL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','matched','auto','pending','approved','rejected')),
+    decided_by INTEGER REFERENCES users(id),
+    decided_at TEXT,
+    decision_note TEXT,
+    UNIQUE (count_id, product_id)
+  );
+  CREATE INDEX idx_count_lines_status ON count_lines(status);
+  `,
+  },
 ];
 
 function migrate(db) {
@@ -335,10 +401,20 @@ function migrate(db) {
     version = 1;
   }
   for (let v = version; v <= MIGRATIONS.length; v++) {
-    tx(db, () => {
-      db.exec(MIGRATIONS[v - 1]);
-      db.exec(`PRAGMA user_version = ${v + 1}`);
-    });
+    const step = typeof MIGRATIONS[v - 1] === 'string' ? { sql: MIGRATIONS[v - 1] } : MIGRATIONS[v - 1];
+    // foreign_keys can only be toggled outside a transaction
+    if (step.foreignKeysOff) db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      tx(db, () => {
+        db.exec(step.sql);
+        if (step.foreignKeysOff && db.prepare('PRAGMA foreign_key_check').all().length) {
+          throw new Error(`Database upgrade to version ${v + 1} would break foreign keys`);
+        }
+        db.exec(`PRAGMA user_version = ${v + 1}`);
+      });
+    } finally {
+      if (step.foreignKeysOff) db.exec('PRAGMA foreign_keys = ON');
+    }
   }
 }
 

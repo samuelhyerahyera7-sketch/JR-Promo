@@ -1,11 +1,11 @@
 'use strict';
 
 const express = require('express');
-const { MANAGEMENT, HttpError, allow, isManagement } = require('../auth');
+const { MANAGEMENT, WAREHOUSE, HttpError, allow, isManagement, isWarehouse } = require('../auth');
 const v = require('../validate');
 const { clientScope } = require('../access');
 
-const OPERATORS = [MANAGEMENT, 'warehouse'];
+const OPERATORS = [MANAGEMENT, WAREHOUSE];
 const MIME = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
 const MAX_BYTES = 8 * 1024 * 1024;
 
@@ -21,7 +21,7 @@ function attachmentRoutes(db) {
   /** Throws unless the user may see / add files on the attachment's parent. */
   function assertParent(user, a, { write = false } = {}) {
     if (a.kind === 'receipt') {
-      if (write ? ![...MANAGEMENT, 'warehouse'].includes(user.role) : user.role === 'promoter') {
+      if (write ? !(isManagement(user) || isWarehouse(user)) : user.role === 'promoter') {
         throw new HttpError(403, 'Only warehouse and office staff can manage delivery photos');
       }
       const exists = db
@@ -30,7 +30,7 @@ function attachmentRoutes(db) {
       if (!exists) throw new HttpError(404, 'Delivery not found');
       return;
     }
-    if (isManagement(user) || user.role === 'warehouse') return;
+    if (isManagement(user) || isWarehouse(user)) return;
     const table = a.kind === 'request' ? 'requests' : 'returns';
     const id = a.kind === 'request' ? a.request_id : a.return_id;
     const row = db
@@ -134,7 +134,7 @@ function attachmentRoutes(db) {
 /** Inbound deliveries: receipts on the ledger grouped by reference and warehouse. */
 function deliveryRoutes(db) {
   const r = express.Router();
-  const ROLES = [MANAGEMENT, 'warehouse', 'account_manager'];
+  const ROLES = [MANAGEMENT, WAREHOUSE, 'account_manager'];
 
   r.get('/', allow(ROLES), (req, res) => {
     const scope = clientScope(req.user);

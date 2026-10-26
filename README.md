@@ -9,6 +9,7 @@ A web-based warehouse and logistics system for JR Promotions (South Africa). It 
 | **Director** | Everything: stock value in Rand, all warehouses, clients and campaigns. Manages staff accounts. |
 | **Office staff** | Same as directors, except managing staff accounts. |
 | **Account manager** | Their own clients only. Creates campaigns, assigns promoters, approves (or trims, or rejects) promoter stock requests, and tracks campaign stock usage and cost. |
+| **Warehouse manager** | Everything warehouse staff can do, plus: adds and edits products and uniform ranges, manages their own team (warehouse staff and promoter accounts, badges), sets up and approves stock counts, writes off expired stock, sees stock values and the shrinkage report. Can't create directors, office staff or account managers, or approve their own counts. |
 | **Warehouse staff** | Receives deliveries (with waybill photos and expiry dates), runs the **promoter counter** (scan a promoter's badge, issue stock, take returns, all signed on screen), works the dispatch queue, sends uniforms to the laundry, transfers between warehouses, does stock takes, prints QR labels. Sees quantities but not Rand values. |
 | **Promoter** | Phone-friendly. Shows their QR ID badge at the counter, requests stock (or whole kits), signs for deliveries, logs what they handed out at each store, and returns leftovers. |
 
@@ -63,6 +64,14 @@ Worked out live and cleared automatically once dealt with:
 - Promoters can photograph the courier waybill when confirming a delivery; warehouse staff can add photos to returns (e.g. damage).
 - Photos are shrunk on the phone before upload and stored in the database, so one backup file covers everything.
 
+### Stock counts (loss control)
+- **Blind counts:** whoever counts never sees the system quantity. They enter what's physically on the shelf (or scan items, one scan per unit) and submit.
+- On submit the system compares. Exact matches close straight away. **Small differences** within the tolerance you set (e.g. up to 2 units *and* up to R200) are adjusted automatically. **Anything bigger waits for a manager**, and stock isn't changed until then.
+- Managers **approve** (stock is adjusted, the ledger records who counted and who approved), **reject** with a reason, or **send for recount** by someone else. **Nobody can approve a count they did themselves** (directors excepted).
+- **Daily cycle counts:** one click picks the products counted longest ago (never-counted first, then highest value), in bin order, for a chosen staff member. Reminders flag stock not counted in 90 days.
+- **Shrinkage report:** missing, found, damaged and expired stock in Rand, by warehouse and product, plus each person's counting accuracy.
+- Direct stock corrections without a count are manager-only and need a reason.
+
 ### Geotags
 - The phone's GPS position is recorded on **activation reports** (proving the promoter was at the store), **handovers** (counter collections, delivery confirmations, returns) and **waybill/delivery photos**. Each shows a 📍 link that opens the spot in Google Maps.
 - Forms show whether the location was captured. If the phone's location is off or not allowed, the action still goes through, but the activation report is marked *No location* and the account manager gets a reminder.
@@ -95,6 +104,7 @@ On first start with an empty database it loads **demo data** (fictional clients 
 | Director | `director@jrpromo.test` |
 | Office staff | `office@jrpromo.test` |
 | Account manager | `lerato@jrpromo.test`, `pieter@jrpromo.test` |
+| Warehouse manager | `manager@jrpromo.test` |
 | Warehouse | `warehouse@jrpromo.test` (JHB), `charlene@…` (CPT), `ashwin@…` (DBN) |
 | Promoter | `promoter@jrpromo.test`, `kagiso@…`, `zanele@…`, `liam@…`, `ayanda@…` |
 
@@ -149,6 +159,7 @@ src/
     workflow.js     stock requests, returns, activation reports, handovers, promoter counter
     attachments.js  waybill / delivery photos, deliveries list
     reminders.js    live reminders
+    counts.js       blind stock counts, approvals, cycle counts, shrinkage report
     misc.js         QR codes, scan lookup, kits
     dashboard.js    role dashboards
   seed.js           demo data

@@ -2,7 +2,7 @@
 
 const crypto = require('node:crypto');
 const express = require('express');
-const { ROLES, MANAGEMENT, HttpError, hashPassword, verifyPassword, createSession, allow, isManagement } = require('../auth');
+const { ROLES, MANAGEMENT, WAREHOUSE, HttpError, hashPassword, verifyPassword, createSession, allow, isManagement } = require('../auth');
 const v = require('../validate');
 const { clientScope } = require('../access');
 
@@ -57,14 +57,26 @@ function publicUser(u) {
   return rest;
 }
 
+// Warehouse managers look after their floor staff and the promoters who collect from them
+const MANAGER_CAN_MANAGE = ['warehouse', 'promoter'];
+const USER_ADMINS = ['director', 'warehouse_manager'];
+
+/** Throws unless the signed-in user may give an account this role. */
+function assertCanManageRole(actor, role) {
+  if (actor.role === 'director') return;
+  if (actor.role === 'warehouse_manager' && MANAGER_CAN_MANAGE.includes(role)) return;
+  throw new HttpError(403, 'Warehouse managers can only manage warehouse staff and promoter accounts');
+}
+
 function userRoutes(db) {
   const r = express.Router();
 
   // Account managers need the promoter list to staff campaigns; warehouse needs it to see who stock goes to.
-  r.get('/', allow(MANAGEMENT, 'account_manager', 'warehouse'), (req, res) => {
+  r.get('/', allow(MANAGEMENT, 'account_manager', WAREHOUSE), (req, res) => {
     const where = ['1=1'];
     const params = [];
-    if (!isManagement(req.user)) where.push("u.role = 'promoter' AND u.active = 1");
+    if (req.user.role === 'warehouse_manager') where.push("u.role IN ('warehouse_manager', 'warehouse', 'promoter')");
+    else if (!isManagement(req.user)) where.push("u.role = 'promoter' AND u.active = 1");
     if (req.query.role) {
       where.push('u.role = ?');
       params.push(req.query.role);
@@ -80,8 +92,9 @@ function userRoutes(db) {
     res.json(rows);
   });
 
-  r.post('/', allow('director'), (req, res) => {
+  r.post('/', allow(USER_ADMINS), (req, res) => {
     const b = req.body;
+    assertCanManageRole(req.user, v.oneOf(b.role, 'Role', ROLES, { required: true }));
     const password = v.str(b.password, 'Password', { required: true });
     if (password.length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
     const email = v.email(b.email, 'Email', { required: true });
@@ -106,10 +119,11 @@ function userRoutes(db) {
     res.status(201).json(getUser(db, info.lastInsertRowid));
   });
 
-  r.patch('/:id', allow('director'), (req, res) => {
+  r.patch('/:id', allow(USER_ADMINS), (req, res) => {
     const id = v.int(req.params.id, 'id', { required: true });
     const user = v.found(getUser(db, id), 'User');
     const b = req.body;
+    assertCanManageRole(req.user, user.role);
     const fields = {
       name: b.name !== undefined ? v.str(b.name, 'Name', { required: true }) : user.name,
       email: b.email !== undefined ? v.email(b.email, 'Email', { required: true }) : user.email,
@@ -121,7 +135,8 @@ function userRoutes(db) {
       uniform_size: b.uniform_size !== undefined ? v.str(b.uniform_size, 'Uniform size', { max: 10 }) : user.uniform_size,
       active: b.active !== undefined ? (b.active ? 1 : 0) : user.active,
     };
-    if (id === req.user.id && (fields.active === 0 || fields.role !== 'director')) {
+    assertCanManageRole(req.user, fields.role);
+    if (id === req.user.id && (fields.active === 0 || fields.role !== user.role)) {
       throw new HttpError(400, 'You cannot deactivate or demote your own account');
     }
     const clash = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').get(fields.email, id);
@@ -149,9 +164,10 @@ function userRoutes(db) {
   });
 
   // Lost or shared badge: issue a new QR code so the old one stops working
-  r.post('/:id/badge', allow(MANAGEMENT), (req, res) => {
+  r.post('/:id/badge', allow(MANAGEMENT, 'warehouse_manager'), (req, res) => {
     const id = v.int(req.params.id, 'id', { required: true });
-    v.found(getUser(db, id), 'User');
+    const user = v.found(getUser(db, id), 'User');
+    if (req.user.role === 'warehouse_manager') assertCanManageRole(req.user, user.role);
     db.prepare('UPDATE users SET badge_code = ? WHERE id = ?').run(newBadge(), id);
     res.json(getUser(db, id));
   });
@@ -208,7 +224,7 @@ function warehouseRoutes(db) {
 function clientRoutes(db) {
   const r = express.Router();
 
-  r.get('/', allow(MANAGEMENT, 'account_manager', 'warehouse'), (req, res) => {
+  r.get('/', allow(MANAGEMENT, 'account_manager', WAREHOUSE), (req, res) => {
     const scope = clientScope(req.user);
     res.json(
       db

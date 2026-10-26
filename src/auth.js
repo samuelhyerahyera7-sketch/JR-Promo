@@ -4,9 +4,13 @@ const crypto = require('node:crypto');
 
 const SESSION_DAYS = 14;
 
-const ROLES = ['director', 'office', 'account_manager', 'warehouse', 'promoter'];
+const ROLES = ['director', 'office', 'account_manager', 'warehouse_manager', 'warehouse', 'promoter'];
 // Directors and office staff run the business and see everything.
 const MANAGEMENT = ['director', 'office'];
+// Everyone who works the warehouse floor (manager included) can receive, pick, dispatch and check in
+const WAREHOUSE = ['warehouse_manager', 'warehouse'];
+// Who may approve stock-count differences and write-offs
+const STOCK_APPROVERS = [...MANAGEMENT, 'warehouse_manager'];
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -69,10 +73,14 @@ function allow(...roles) {
 }
 
 const isManagement = (user) => MANAGEMENT.includes(user.role);
+const isWarehouse = (user) => WAREHOUSE.includes(user.role);
+const isStockApprover = (user) => STOCK_APPROVERS.includes(user.role);
 
 module.exports = {
   ROLES,
   MANAGEMENT,
+  WAREHOUSE,
+  STOCK_APPROVERS,
   HttpError,
   hashPassword,
   verifyPassword,
@@ -81,4 +89,6 @@ module.exports = {
   authenticate,
   allow,
   isManagement,
+  isWarehouse,
+  isStockApprover,
 };

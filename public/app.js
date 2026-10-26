@@ -30,6 +30,7 @@
     director: 'Director',
     office: 'Office staff',
     account_manager: 'Account manager',
+    warehouse_manager: 'Warehouse manager',
     warehouse: 'Warehouse',
     promoter: 'Promoter',
   };
@@ -626,9 +627,14 @@
   const state = { user: null, counts: {}, lookups: {} };
   const role = () => state.user && state.user.role;
   const isMgmt = () => ['director', 'office'].includes(role());
-  const isOps = () => isMgmt() || role() === 'warehouse';
+  // Warehouse floor: staff and their manager
+  const isWh = () => ['warehouse', 'warehouse_manager'].includes(role());
+  const isOps = () => isMgmt() || isWh();
+  // Approves count differences and write-offs, manages warehouse staff
+  const isApprover = () => isMgmt() || role() === 'warehouse_manager';
+  const canEditProducts = () => isApprover() || role() === 'account_manager';
   const canSeeStock = () => isOps() || role() === 'account_manager';
-  const canSeeCost = () => isMgmt() || role() === 'account_manager';
+  const canSeeCost = () => isApprover() || role() === 'account_manager';
 
   async function lookup(key, path) {
     if (!state.lookups[key]) state.lookups[key] = get(path);
@@ -663,12 +669,12 @@
     if (isOps()) items.push({ route: 'counter', label: 'Promoter counter' });
     items.push({
       route: 'requests',
-      label: r === 'warehouse' ? 'Dispatch queue' : 'Stock requests',
-      count: r === 'warehouse' ? state.counts.to_dispatch : state.counts.pending_approval,
+      label: isWh() ? 'Dispatch queue' : 'Stock requests',
+      count: isWh() ? state.counts.to_dispatch : state.counts.pending_approval,
     });
-    items.push({ route: 'returns', label: 'Returns', count: r === 'warehouse' ? state.counts.pending_returns : null });
+    items.push({ route: 'returns', label: 'Returns', count: isWh() ? state.counts.pending_returns : null });
     items.push({ route: 'deliveries', label: 'Deliveries & waybills' }, { route: 'handovers', label: 'Handover log' });
-    if (r !== 'warehouse') items.push({ route: 'campaigns', label: 'Campaigns' }, { route: 'usage', label: 'Activation reports' });
+    if (!isWh()) items.push({ route: 'campaigns', label: 'Campaigns' }, { route: 'usage', label: 'Activation reports' });
     items.push(
       { group: 'Stock' },
       { route: 'stock', label: 'Stock on hand' },
@@ -680,19 +686,20 @@
       items.push(
         { route: 'receive', label: 'Receive stock' },
         { route: 'transfer', label: 'Transfer' },
-        { route: 'count', label: 'Stock take' },
+        { route: 'count', label: 'Stock counts', count: state.counts.counts },
         { route: 'laundry', label: 'Laundry' },
         { route: 'labels', label: 'QR labels' },
       );
     }
+    if (isApprover()) items.push({ route: 'shrinkage', label: 'Shrinkage report' });
     items.push({ route: 'movements', label: 'Stock ledger' });
-    if (r === 'warehouse') items.push({ route: 'campaigns', label: 'Campaigns' });
+    if (isWh()) items.push({ route: 'campaigns', label: 'Campaigns' });
     items.push({ group: 'Setup' }, { route: 'kits', label: 'Kits & setups' });
     if (isOps()) items.push({ route: 'badges', label: 'Promoter badges' });
-    if (r !== 'warehouse') {
+    if (r === 'director' || r === 'warehouse_manager') items.push({ route: 'users', label: r === 'director' ? 'Staff & users' : 'My team' });
+    if (!isWh()) {
       items.push({ route: 'clients', label: 'Clients' });
       if (isMgmt()) items.push({ route: 'warehouses', label: 'Warehouses' });
-      if (r === 'director') items.push({ route: 'users', label: 'Staff & users' });
     }
     return items;
   }
@@ -712,7 +719,11 @@
   async function refreshCounts() {
     try {
       const [d, reminders] = await Promise.all([get('/dashboard'), get('/reminders')]);
-      state.counts = { ...(d.kpis || {}), reminders: reminders.filter((x) => x.severity !== 'low').length };
+      state.counts = {
+        ...(d.kpis || {}),
+        reminders: reminders.filter((x) => x.severity !== 'low').length,
+        counts: reminders.filter((x) => x.type === 'count_approval' || x.type === 'count_assigned').length,
+      };
       state.lastDashboard = d;
       state.reminders = reminders;
     } catch {
@@ -844,6 +855,7 @@
       }
     };
     const demo = [
+      ['Warehouse manager', 'manager@jrpromo.test'],
       ['Director', 'director@jrpromo.test'],
       ['Office', 'office@jrpromo.test'],
       ['Account manager', 'lerato@jrpromo.test'],
@@ -1005,14 +1017,14 @@
       kpi('Units with promoters', num(k.units_in_field)),
       k.field_value !== undefined ? kpi('Value with promoters', money(k.field_value)) : null,
       kpi('Below reorder level', num(k.low_stock), { alert: k.low_stock > 0, href: '#/stock' }),
-      r !== 'warehouse' ? kpi('Awaiting approval', num(k.pending_approval), { alert: k.pending_approval > 0, href: '#/requests' }) : null,
+      !isWh() ? kpi('Awaiting approval', num(k.pending_approval), { alert: k.pending_approval > 0, href: '#/requests' }) : null,
       kpi('To pick & dispatch', num(k.to_dispatch), { href: '#/requests' }),
       kpi('Returns to check in', num(k.pending_returns), { href: '#/returns' }),
-      kpi('Active campaigns', num(k.active_campaigns), { href: r === 'warehouse' ? null : '#/campaigns' }),
+      kpi('Active campaigns', num(k.active_campaigns), { href: isWh() ? null : '#/campaigns' }),
     );
 
     const work =
-      r === 'warehouse'
+      isWh()
         ? h(
             'div',
             { class: 'card' },
@@ -1276,8 +1288,8 @@
       'Stock on hand',
       [
         h('a', { class: 'btn secondary', href: `/api/stock/levels.csv`, onclick: (e) => { e.currentTarget.href = `/api/stock/levels.csv${qs(filters)}`; } }, 'Export CSV'),
-        isMgmt() || role() === 'account_manager' ? h('button', { class: 'secondary', onclick: () => rangeForm(load) }, 'New uniform range') : null,
-        isMgmt() || role() === 'account_manager' ? h('button', { onclick: () => productForm(null, load) }, 'New product') : null,
+        canEditProducts() ? h('button', { class: 'secondary', onclick: () => rangeForm(load) }, 'New uniform range') : null,
+        canEditProducts() ? h('button', { onclick: () => productForm(null, load) }, 'New product') : null,
       ],
       h('div', { class: 'card' }, h('div', { class: 'filters' }, search, clientSel, catSel, h('label', { class: 'check' }, lowBox, 'Low stock only'), h('label', { class: 'check' }, expBox, 'Expiring / expired')), out),
     );
@@ -1286,7 +1298,7 @@
   async function productDetail(id) {
     const p = await busy(null, () => get(`/products/${id}`));
     if (!p) return;
-    const canEdit = isMgmt() || (role() === 'account_manager' && !p.is_house);
+    const canEdit = isApprover() || (role() === 'account_manager' && !p.is_house);
     const variants = p.variants.length > 1 ? variantGrid(p) : null;
     const body = h(
       'div',
@@ -1520,64 +1532,387 @@
     return `${num(l ? l.qty : 0)} on hand here${l && l.bin ? ` · bin ${l.bin}` : ''}`;
   }
 
-  routes.count = async () => {
-    const [whs, cls] = await Promise.all([warehouses(), clients()]);
-    const wh = select(whs.filter((w) => w.active).map((w) => ({ value: w.id, label: w.name })), { value: state.user.warehouse_id || '' }, 'Choose warehouse…');
-    const cl = select(cls.map((c) => ({ value: c.id, label: c.name })), {}, 'All clients');
-    const note = input({ placeholder: 'e.g. Month-end count October' });
+  // ------------------------------------------------------------------ stock counts (blind, with approval)
+
+  const COUNT_STATUS = { open: ['picking', 'Counting'], submitted: ['pending', 'Needs approval'], closed: ['completed', 'Closed'], cancelled: ['cancelled', 'Cancelled'] };
+  const LINE_STATUS = {
+    open: ['', 'Not submitted'],
+    matched: ['received', 'Matched'],
+    auto: ['approved', 'Auto-adjusted'],
+    pending: ['pending', 'Needs approval'],
+    approved: ['delivered', 'Approved'],
+    rejected: ['rejected', 'Rejected'],
+  };
+  const KIND_NAMES = { cycle: 'Cycle count', spot: 'Spot check', full: 'Full count' };
+  const countBadge = (st) => badge(COUNT_STATUS[st][0], COUNT_STATUS[st][1]);
+  const lineBadge = (st) => badge(LINE_STATUS[st][0], LINE_STATUS[st][1]);
+  const signed = (n) => (n > 0 ? `+${num(n)}` : num(n));
+
+  /** People a count can be assigned to: warehouse staff and managers. */
+  async function counters() {
+    if (!isApprover()) return [{ value: state.user.id, label: state.user.name }];
+    const users = await get('/users');
+    return users
+      .filter((u) => u.active && ['warehouse', 'warehouse_manager', 'office', 'director'].includes(u.role))
+      .map((u) => ({ value: u.id, label: `${u.name} (${ROLE_NAMES[u.role]}${u.warehouse_name ? `, ${u.warehouse_name}` : ''})` }));
+  }
+
+  routes.count = async (id) => {
+    if (id) return countDetail(id);
+    const [whs, settings] = await Promise.all([warehouses(), get('/counts/settings')]);
+    const tabsDef = [['submitted', 'Needs approval'], ['open', 'Counting'], ['closed,cancelled', 'Closed'], ['', 'All']];
+    const first = await get('/counts?status=submitted');
+    let status = isApprover() && first.length ? 'submitted' : 'open';
+    const whSel = select(whs.filter((w) => w.active).map((w) => ({ value: w.id, label: w.name })), { value: role() === 'warehouse' ? state.user.warehouse_id || '' : '' }, 'All warehouses');
+    const tabs = h('div', { class: 'tabs' });
     const out = h('div');
-    const counted = new Map();
     const load = async () => {
-      counted.clear();
-      if (!wh.value) return out.replaceChildren(h('div', { class: 'empty' }, 'Choose a warehouse to start counting'));
-      invalidate('products');
-      const rows = (await get(`/products${qs({ client_id: cl.value })}`));
+      tabs.replaceChildren(...tabsDef.map(([st, label]) => h('button', { class: st === status ? 'active' : null, onclick: () => { status = st; load(); } }, label)));
+      const rows = await get(`/counts${qs({ status, warehouse_id: whSel.value })}`);
       out.replaceChildren(
         table(
           [
-            { label: 'SKU', render: (x) => h('span', { class: 'mono' }, x.sku) },
-            { label: 'Product', render: (x) => h('div', null, x.name, h('div', { class: 'small muted' }, x.client_name)) },
-            { label: 'Bin', render: (x) => (x.levels.find((l) => String(l.warehouse_id) === wh.value) || {}).bin || '—' },
-            { label: 'System qty', num: true, render: (x) => num((x.levels.find((l) => String(l.warehouse_id) === wh.value) || {}).qty || 0) },
-            {
-              label: 'Counted',
-              num: true,
-              render: (x) => {
-                const el = input({ type: 'number', min: '0', step: '1', style: 'width:110px', inputmode: 'numeric' });
-                el.addEventListener('input', () => (el.value === '' ? counted.delete(x.id) : counted.set(x.id, el.value)));
-                return el;
-              },
-            },
-          ],
+            { label: 'Ref', render: (x) => h('span', { class: 'mono' }, x.ref) },
+            { label: 'Warehouse', key: 'warehouse_name' },
+            { label: 'Type', render: (x) => KIND_NAMES[x.kind] },
+            { label: 'Counted by', key: 'assigned_name' },
+            { label: 'Created', render: (x) => fmtDate(x.created_at), class: 'nowrap' },
+            { label: 'Progress', num: true, render: (x) => (x.status === 'open' ? `${x.counted_lines} / ${x.lines}` : `${x.lines} lines`) },
+            { label: 'Differences', num: true, render: (x) => (x.status === 'open' ? '—' : num(x.variance_lines)) },
+            isApprover() ? { label: 'Adjusted', num: true, render: (x) => (x.status === 'open' ? '—' : money(x.adjusted_value)) } : null,
+            { label: 'Status', render: (x) => h('span', null, countBadge(x.status), x.pending_lines ? h('span', { class: 'small muted' }, ` ${x.pending_lines} to approve`) : null) },
+          ].filter(Boolean),
           rows,
+          { onRow: (x) => go(`count/${x.id}`), empty: status === 'open' ? 'No counts in progress' : 'Nothing here' },
         ),
       );
     };
-    wh.addEventListener('change', load);
-    cl.addEventListener('change', load);
+    whSel.addEventListener('change', load);
     await load();
-    const save = h('button', null, 'Post stock take');
-    save.onclick = () =>
-      busy(save, async () => {
-        if (!counted.size) throw new Error('Enter at least one counted quantity');
-        const r = await post('/stock/count', { warehouse_id: wh.value, note: note.value, items: [...counted].map(([product_id, c]) => ({ product_id, counted: c })) });
-        const changed = r.variances.filter((v) => v.variance !== 0);
-        toast(changed.length ? `${changed.length} variance(s) posted to the ledger` : 'Count matches the system, no adjustments needed', 'ok');
-        invalidate('products', 'warehouses');
-        load();
-      });
+
+    let settingsCard = null;
+    if (isApprover()) {
+      const units = input({ type: 'number', min: '0', value: settings.tolerance_units, style: 'width:90px' });
+      const value = input({ type: 'number', min: '0', step: '0.01', value: settings.tolerance_value, style: 'width:110px' });
+      const save = h('button', { class: 'secondary small' }, 'Save');
+      save.onclick = () => busy(save, async () => { await api('PUT', '/counts/settings', { tolerance_units: units.value, tolerance_value: value.value }); toast('Tolerance saved', 'ok'); });
+      settingsCard = h(
+        'div',
+        { class: 'card' },
+        h('h2', null, 'Approval tolerance'),
+        h('p', { class: 'muted small', style: 'margin-top:0' }, 'Differences up to this size are adjusted automatically. Anything bigger waits for a manager. Set both to 0 to approve every difference yourself.'),
+        h('div', { class: 'filters' }, h('label', { class: 'check' }, 'Up to', units, 'units'), h('label', { class: 'check' }, 'and up to R', value), save),
+      );
+    }
     return page(
-      'Stock take',
-      null,
+      'Stock counts',
+      [
+        isApprover() ? h('button', { onclick: () => cycleForm() }, 'Daily cycle count') : null,
+        h('button', { class: isApprover() ? 'secondary' : null, onclick: () => newCountForm() }, 'Start a count'),
+      ],
       h(
         'div',
         { class: 'card' },
-        h('p', { class: 'muted small', style: 'margin-top:0' }, 'Enter physical counts. Only lines you fill in are posted; differences are recorded as adjustments on the ledger.'),
-        h('div', { class: 'filters' }, wh, cl, note),
+        h('p', { class: 'muted small', style: 'margin-top:0' }, 'Counts are blind: whoever counts never sees the system quantity. The system compares when the count is submitted. Nobody can approve a count they did themselves.'),
+        h('div', { class: 'filters' }, tabs, h('div', { style: 'margin-left:auto' }, whSel)),
         out,
-        h('div', { style: 'margin-top:16px' }, save),
+      ),
+      settingsCard,
+    );
+  };
+
+  async function newCountForm() {
+    const [whs, cls, cats, people] = await Promise.all([warehouses(), clients(), get('/products/categories'), counters()]);
+    const wh = select(whs.filter((w) => w.active).map((w) => ({ value: w.id, label: w.name })), { value: state.user.warehouse_id || '' }, 'Choose warehouse…');
+    const who = select(people, { value: state.user.id });
+    const kind = select([{ value: 'spot', label: 'Spot check (filtered)' }, { value: 'full', label: 'Full count (everything in the warehouse)' }], { value: 'spot' });
+    const client = select(cls.map((c) => ({ value: c.id, label: c.name })), {}, 'Any client');
+    const cat = select(cats.map((c) => ({ value: c, label: c })), {}, 'Any category');
+    const bin = input({ placeholder: 'e.g. A-3', maxlength: '20' });
+    const note = input({ placeholder: 'Why? e.g. "Missing aprons reported"' });
+    const filters = h('div', { class: 'form-grid field full' }, field('Client', client), field('Category', cat), field('Bins starting with', bin));
+    kind.addEventListener('change', () => (filters.hidden = kind.value === 'full'));
+    const save = h('button', null, 'Create count');
+    const m = modal(
+      'Start a count',
+      h('div', { class: 'form-grid' }, field('Warehouse', wh), isApprover() ? field('Counted by', who) : null, field('What to count', kind, { full: true }), filters, field('Note', note, { full: true })),
+      [save],
+    );
+    save.onclick = () =>
+      busy(save, async () => {
+        const res = await post('/counts', {
+          warehouse_id: wh.value,
+          assigned_to: isApprover() ? who.value : undefined,
+          kind: kind.value,
+          client_id: kind.value === 'full' ? undefined : client.value || undefined,
+          category: kind.value === 'full' ? undefined : cat.value || undefined,
+          bin_prefix: kind.value === 'full' ? undefined : bin.value || undefined,
+          note: note.value,
+        });
+        m.close();
+        toast(`${res.ref} created with ${res.items.length} products`, 'ok');
+        go(`count/${res.id}`);
+      });
+  }
+
+  async function cycleForm() {
+    const [whs, people] = await Promise.all([warehouses(), counters()]);
+    const wh = select(whs.filter((w) => w.active).map((w) => ({ value: w.id, label: w.name })), { value: state.user.warehouse_id || '' }, 'Choose warehouse…');
+    const who = select(people, {}, 'Choose who counts…');
+    const size = input({ type: 'number', min: '1', max: '200', value: 20 });
+    const save = h('button', null, 'Create cycle count');
+    const m = modal(
+      'Daily cycle count',
+      h(
+        'div',
+        null,
+        h('p', { class: 'muted', style: 'margin-top:0' }, 'Picks the products counted longest ago (never-counted first, then highest value), in bin order. A few each day keeps the whole warehouse checked without shutting down for a full count.'),
+        h('div', { class: 'form-grid' }, field('Warehouse', wh), field('Counted by', who), field('Number of products', size)),
+      ),
+      [save],
+    );
+    save.onclick = () =>
+      busy(save, async () => {
+        const res = await post('/counts/cycle', { warehouse_id: wh.value, assigned_to: who.value, lines: size.value });
+        m.close();
+        toast(`${res.ref}: ${res.items.length} products for ${res.assigned_name}`, 'ok');
+        go(`count/${res.id}`);
+      });
+  }
+
+  async function countDetail(id) {
+    const c = await get(`/counts/${id}`);
+    const reload = () => render();
+    const head = h(
+      'div',
+      { class: 'card' },
+      h(
+        'dl',
+        { class: 'dl' },
+        h('dt', null, 'Warehouse'), h('dd', null, c.warehouse_name),
+        h('dt', null, 'Type'), h('dd', null, KIND_NAMES[c.kind]),
+        h('dt', null, 'Counted by'), h('dd', null, c.assigned_name),
+        h('dt', null, 'Created'), h('dd', null, `${c.created_by_name}, ${fmtDateTime(c.created_at)}`),
+        c.submitted_at ? [h('dt', null, 'Submitted'), h('dd', null, fmtDateTime(c.submitted_at))] : null,
+        c.note ? [h('dt', null, 'Note'), h('dd', null, c.note)] : null,
       ),
     );
+    const actions = [h('a', { class: 'btn secondary', href: '#/count' }, '← All counts')];
+    if (c.status === 'open' && (isApprover() || c.created_by === state.user.id)) {
+      actions.push(h('button', { class: 'secondary', onclick: (e) => busy(e.target, async () => {
+        if (!confirm(`Cancel ${c.ref}? Nothing will be adjusted.`)) return;
+        await post(`/counts/${c.id}/cancel`);
+        reload();
+      }) }, 'Cancel count'));
+    }
+    const title = h('span', null, h('span', { class: 'mono' }, c.ref), ' ', countBadge(c.status));
+
+    if (c.can_count) {
+      // Blind entry: no system figures anywhere on this screen
+      const inputs = new Map();
+      const rows = table(
+        [
+          { label: 'Bin', render: (x) => h('strong', { class: 'mono' }, x.bin || '—') },
+          { label: 'Product', render: (x) => h('div', null, x.product_name, h('div', { class: 'small muted mono' }, x.sku)) },
+          {
+            label: 'Counted',
+            num: true,
+            render: (x) => {
+              const el = input({ type: 'number', min: '0', step: '1', inputmode: 'numeric', value: x.counted_qty ?? '', placeholder: '—', style: 'width:110px' });
+              inputs.set(x.id, el);
+              return el;
+            },
+          },
+        ],
+        c.items,
+      );
+      const values = () => [...inputs].map(([lineId, el]) => ({ id: lineId, counted_qty: el.value === '' ? null : el.value }));
+      const progress = h('div', { class: 'hint' });
+      const showProgress = () => {
+        const done = [...inputs.values()].filter((el) => el.value !== '').length;
+        progress.textContent = `${done} of ${inputs.size} counted`;
+      };
+      inputs.forEach((el) => el.addEventListener('input', showProgress));
+      showProgress();
+      const scan = h('button', { class: 'secondary', type: 'button' }, '⌗ Scan to count');
+      scan.onclick = () =>
+        scanner(
+          (code) => {
+            const sku = skuFromCode(code);
+            const line = c.items.find((l) => l.sku.toUpperCase() === sku || l.barcode === code);
+            if (!line) throw new Error(`✗ ${sku} is not on this count`);
+            const el = inputs.get(line.id);
+            el.value = Number(el.value || 0) + 1;
+            showProgress();
+            return `✓ ${line.sku}: ${el.value}`;
+          },
+          { title: `Count ${c.ref}`, keepOpen: true, help: 'Each scan adds 1. Type the number in for full boxes.' },
+        );
+      const saveBtn = h('button', { class: 'secondary' }, 'Save progress');
+      saveBtn.onclick = () => busy(saveBtn, async () => { await api('PUT', `/counts/${c.id}/lines`, { lines: values() }); toast('Saved', 'ok'); });
+      const submit = h('button', { class: 'ok' }, 'Submit count');
+      submit.onclick = () =>
+        busy(submit, async () => {
+          const missing = values().filter((v) => v.counted_qty === null).length;
+          if (missing) throw new Error(`${missing} line(s) not counted yet. Enter 0 if there are none.`);
+          if (!confirm('Submit this count? You cannot change it afterwards.')) return;
+          await api('PUT', `/counts/${c.id}/lines`, { lines: values() });
+          const res = await post(`/counts/${c.id}/submit`);
+          const pending = res.items.filter((l) => l.status === 'pending').length;
+          toast(pending ? `Submitted. ${pending} difference(s) sent to a manager for approval.` : 'Submitted. Everything matched or was within tolerance.', 'ok');
+          reload();
+        });
+      return page(
+        title,
+        actions,
+        head,
+        h(
+          'div',
+          { class: 'card' },
+          h('div', { class: 'blind-note' }, '🙈 Blind count: count what is physically on the shelf. The system quantity stays hidden until you submit.'),
+          rows,
+          progress,
+          h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:14px' }, scan, saveBtn, submit),
+        ),
+      );
+    }
+
+    // Submitted / closed: results, and decisions for managers
+    const picked = new Set();
+    const cost = isApprover();
+    const results = table(
+      [
+        c.can_decide
+          ? {
+              label: '',
+              render: (x) => {
+                if (x.status !== 'pending') return null;
+                const box = input({ type: 'checkbox', checked: true, 'aria-label': `Select ${x.sku}` });
+                picked.add(x.id);
+                box.addEventListener('change', () => (box.checked ? picked.add(x.id) : picked.delete(x.id)));
+                return box;
+              },
+            }
+          : null,
+        { label: 'Bin', render: (x) => h('span', { class: 'mono' }, x.bin || '—') },
+        { label: 'Product', render: (x) => h('div', null, x.product_name, h('div', { class: 'small muted mono' }, x.sku)) },
+        { label: 'Counted', num: true, render: (x) => (x.counted_qty === null ? '—' : num(x.counted_qty)) },
+        { label: 'System', num: true, render: (x) => (x.system_qty === null || x.system_qty === undefined ? '—' : num(x.system_qty)) },
+        { label: 'Difference', num: true, render: (x) => (x.variance ? h('strong', { class: x.variance < 0 ? 'text-danger' : 'text-ok' }, signed(x.variance)) : x.variance === 0 ? '0' : '—') },
+        cost ? { label: 'Value', num: true, render: (x) => (x.variance ? h('span', { class: x.variance < 0 ? 'text-danger' : 'text-ok' }, money(x.variance * x.unit_cost)) : '—') } : null,
+        { label: 'Status', render: (x) => h('div', null, lineBadge(x.status), x.decided_by_name ? h('div', { class: 'small muted' }, x.decided_by_name) : null, x.decision_note ? h('div', { class: 'small muted' }, x.decision_note) : null) },
+      ].filter(Boolean),
+      c.items,
+      { rowClass: (x) => (x.status === 'pending' ? 'low' : '') },
+    );
+    const pendingCount = c.items.filter((l) => l.status === 'pending').length;
+    let decide = null;
+    if (c.can_decide && pendingCount) {
+      const note = input({ placeholder: 'Reason / note (required to reject)' });
+      const decideOn = (approve) =>
+        busy(null, async () => {
+          if (!picked.size) throw new Error('Tick the lines first');
+          await post(`/counts/${c.id}/decide`, { decisions: [...picked].map((line_id) => ({ line_id, approve, note: note.value })) });
+          toast(approve ? 'Approved. Stock adjusted.' : 'Rejected. Stock left as it was.', 'ok');
+          reload();
+        });
+      const people = await counters();
+      const recountWho = select(people.filter((p) => String(p.value) !== String(c.assigned_to)), {}, 'Recount by…');
+      const recount = h('button', { class: 'secondary' }, 'Send for recount');
+      recount.onclick = () =>
+        busy(recount, async () => {
+          if (!picked.size) throw new Error('Tick the lines first');
+          if (!recountWho.value) throw new Error('Choose who should recount');
+          const res = await post(`/counts/${c.id}/recount`, { line_ids: [...picked], assigned_to: recountWho.value });
+          toast(`${res.ref} created for ${res.assigned_name}`, 'ok');
+          go(`count/${res.id}`);
+        });
+      decide = h(
+        'div',
+        { class: 'decide-bar' },
+        h('div', { style: 'flex:1;min-width:220px' }, note),
+        h('button', { class: 'ok', onclick: () => decideOn(true) }, 'Approve ticked'),
+        h('button', { class: 'danger', onclick: () => decideOn(false) }, 'Reject ticked'),
+        h('div', { style: 'display:flex;gap:6px' }, recountWho, recount),
+      );
+    }
+    const selfCounted = c.status === 'submitted' && isApprover() && !c.can_decide;
+    const net = c.items.reduce((sum, l) => sum + (l.variance || 0) * (l.unit_cost || 0), 0);
+    return page(
+      title,
+      actions,
+      head,
+      h(
+        'div',
+        { class: 'card' },
+        h('h2', null, 'Results'),
+        cost && c.items.some((l) => l.variance) ? h('p', { class: 'muted small', style: 'margin-top:0' }, `Net difference across all lines: ${money(net)}`) : null,
+        selfCounted ? h('div', { class: 'alert-box' }, 'You counted this yourself, so another manager (or a director) has to approve the differences.') : null,
+        results,
+        decide,
+      ),
+    );
+  }
+
+  routes.shrinkage = async () => {
+    const whs = await warehouses();
+    const from = input({ type: 'date', value: (() => { const d = new Date(Date.now() - 30 * 864e5); return d.toISOString().slice(0, 10); })() });
+    const to = input({ type: 'date', value: today() });
+    const whSel = select(whs.map((w) => ({ value: w.id, label: w.name })), {}, 'All warehouses');
+    const out = h('div');
+    const load = async () => {
+      const d = await get(`/reports/shrinkage${qs({ from: from.value, to: to.value, warehouse_id: whSel.value })}`);
+      const t = d.totals;
+      out.replaceChildren(
+        h(
+          'div',
+          { class: 'kpis' },
+          kpi('Net loss', money(t.net_loss_value), { alert: t.net_loss_value > 0 }),
+          kpi('Missing at counts', money(t.missing_value), { alert: t.missing_value > 0 }),
+          kpi('Found at counts', money(t.found_value)),
+          kpi('Damaged', money(t.damaged_value)),
+          kpi('Expired write-offs', money(t.expired_value)),
+        ),
+        h(
+          'div',
+          { class: 'grid two' },
+          h('div', { class: 'card' }, h('h2', null, 'By warehouse'), table(
+            [
+              { label: 'Warehouse', key: 'name' },
+              { label: 'Count losses', num: true, render: (x) => h('span', { class: x.count_loss_value > 0 ? 'text-danger' : '' }, money(x.count_loss_value)) },
+              { label: 'Expired', num: true, render: (x) => money(x.expired_value) },
+            ],
+            d.by_warehouse,
+          )),
+          h('div', { class: 'card' }, h('h2', null, 'Counting accuracy by person'), table(
+            [
+              { label: 'Counter', render: (x) => h('div', null, x.name, h('div', { class: 'small muted' }, ROLE_NAMES[x.role])) },
+              { label: 'Lines', num: true, render: (x) => num(x.lines) },
+              { label: 'Exact', num: true, render: (x) => `${x.accuracy}%` },
+              { label: 'Rejected', num: true, render: (x) => num(x.rejected) },
+              { label: 'Adjusted', num: true, render: (x) => money(x.adjusted_value) },
+            ],
+            d.by_counter,
+            { empty: 'No counts submitted in this period' },
+          )),
+        ),
+        h('div', { class: 'card' }, h('h2', null, 'By product'), table(
+          [
+            { label: 'Product', render: (x) => h('div', null, x.name, h('div', { class: 'small muted' }, `${x.sku} · ${x.client_name}`)) },
+            { label: 'Missing', num: true, render: (x) => (x.missing ? h('span', { class: 'text-danger' }, num(x.missing)) : '—') },
+            { label: 'Found', num: true, render: (x) => (x.found ? num(x.found) : '—') },
+            { label: 'Damaged', num: true, render: (x) => (x.damaged ? num(x.damaged) : '—') },
+            { label: 'Expired', num: true, render: (x) => (x.expired ? num(x.expired) : '—') },
+            { label: 'Net loss', num: true, render: (x) => h('strong', { class: x.net_loss_value > 0 ? 'text-danger' : '' }, money(x.net_loss_value)) },
+          ],
+          d.by_product,
+          { empty: 'No losses or gains in this period 🎉' },
+        )),
+      );
+    };
+    [from, to, whSel].forEach((el) => el.addEventListener('change', load));
+    await load();
+    return page('Shrinkage report', null, h('div', { class: 'filters' }, h('label', { class: 'check' }, 'From', from), h('label', { class: 'check' }, 'to', to), whSel), out);
   };
 
   // ------------------------------------------------------------------ field stock & ledger
@@ -1657,7 +1992,7 @@
   routes.requests = async (id) => {
     if (id) return requestDetail(id);
     const r = role();
-    let tab = r === 'warehouse' ? 'ready' : r === 'promoter' ? 'open' : 'pending';
+    let tab = isWh() ? 'ready' : r === 'promoter' ? 'open' : 'pending';
     const whs = await warehouses();
     const whSel = select(whs.map((w) => ({ value: w.id, label: w.name })), { value: r === 'warehouse' ? state.user.warehouse_id || '' : '' }, 'All warehouses');
     const tabs = h('div', { class: 'tabs' });
@@ -1688,8 +2023,8 @@
     whSel.addEventListener('change', load);
     await load();
     return page(
-      r === 'warehouse' ? 'Dispatch queue' : 'Stock requests',
-      [r !== 'warehouse' ? h('button', { onclick: () => requestForm() }, 'New request') : null],
+      isWh() ? 'Dispatch queue' : 'Stock requests',
+      [!isWh() ? h('button', { onclick: () => requestForm() }, 'New request') : null],
       h('div', { class: 'card' }, h('div', { class: 'filters' }, tabs, h('div', { style: 'margin-left:auto' }, whSel)), out),
     );
   };
@@ -2072,7 +2407,7 @@
     await load();
     return page(
       'Returns',
-      [role() !== 'warehouse' ? h('button', { onclick: () => returnForm(load) }, 'Log a return') : null],
+      [!isWh() ? h('button', { onclick: () => returnForm(load) }, 'Log a return') : null],
       h('div', { class: 'card' }, h('p', { class: 'muted small', style: 'margin-top:0' }, 'Unused stock coming back from promoters. The warehouse checks it in, splitting good and damaged units.'), tabs, out),
     );
   };
@@ -2241,7 +2576,7 @@
     const rows = await get('/usage');
     return page(
       'Activation reports',
-      [role() === 'warehouse' ? null : h('button', { onclick: () => usageForm() }, 'Log activation')],
+      [isWh() ? null : h('button', { onclick: () => usageForm() }, 'Log activation')],
       h(
         'div',
         { class: 'card' },
@@ -2362,7 +2697,7 @@
       h('span', null, c.name, ' ', badge(c.status)),
       [
         h('a', { class: 'btn secondary', href: '#/campaigns' }, '← Campaigns'),
-        role() !== 'warehouse' && ['planned', 'active'].includes(c.status) ? h('button', { onclick: () => requestForm() }, 'Request stock') : null,
+        !isWh() && ['planned', 'active'].includes(c.status) ? h('button', { onclick: () => requestForm() }, 'Request stock') : null,
         canManage ? h('button', { class: 'secondary', onclick: () => campaignForm(c) }, 'Edit') : null,
       ],
       h(
@@ -2599,9 +2934,9 @@
     const [rows, whs] = await Promise.all([get('/users'), warehouses()]);
     const counts = rows.filter((u) => u.active).reduce((m, u) => ({ ...m, [u.role]: (m[u.role] || 0) + 1 }), {});
     return page(
-      'Staff & users',
-      [h('button', { onclick: () => userForm(null, whs) }, 'Add user')],
-      h('div', { class: 'kpis' }, Object.entries(ROLE_NAMES).map(([k, label]) => kpi(label, num(counts[k] || 0)))),
+      role() === 'director' ? 'Staff & users' : 'My team',
+      [h('button', { onclick: () => userForm(null, whs) }, role() === 'director' ? 'Add user' : 'Add staff member or promoter')],
+      h('div', { class: 'kpis' }, Object.entries(ROLE_NAMES).filter(([k]) => role() === 'director' || ['warehouse_manager', 'warehouse', 'promoter'].includes(k)).map(([k, label]) => kpi(label, num(counts[k] || 0)))),
       h(
         'div',
         { class: 'card' },
@@ -2616,7 +2951,7 @@
             { label: 'Warehouse', render: (x) => x.warehouse_name || '—' },
           ],
           rows,
-          { onRow: (x) => userForm(x, whs) },
+          { onRow: (x) => (role() === 'director' || ['warehouse', 'promoter'].includes(x.role) ? userForm(x, whs) : toast('Only a director can edit this account', 'error')) },
         ),
       ),
     );
@@ -2627,7 +2962,13 @@
       name: input({ value: u ? u.name : '' }),
       email: input({ type: 'email', value: u ? u.email : '' }),
       phone: input({ type: 'tel', value: u ? u.phone || '' : '' }),
-      role: select(Object.entries(ROLE_NAMES).map(([value, label]) => ({ value, label })), { value: u ? u.role : 'promoter' }),
+      // Warehouse managers can only create floor staff and promoters
+      role: select(
+        Object.entries(ROLE_NAMES)
+          .filter(([value]) => role() === 'director' || ['warehouse', 'promoter'].includes(value))
+          .map(([value, label]) => ({ value, label })),
+        { value: u ? u.role : 'promoter' },
+      ),
       region: select(
         ['Gauteng', 'Western Cape', 'KwaZulu-Natal', 'Eastern Cape', 'Free State', 'Limpopo', 'Mpumalanga', 'North West', 'Northern Cape'].map((p) => ({ value: p, label: p })),
         { value: u ? u.region || '' : '' },
@@ -3054,7 +3395,7 @@
       const expiredGroups = new Map();
       for (const r of rows.filter((x) => x.days_left < 0)) expiredGroups.set(`${r.product_id}-${r.warehouse_id}`, r);
       out.replaceChildren(
-        expiredGroups.size && isOps()
+        expiredGroups.size && isApprover()
           ? h('div', { class: 'alert-box' }, h('strong', null, 'Expired stock is never dispatched. '), 'Write it off once it has been disposed of or sent back to the client.',
               h('div', { class: 'list', style: 'margin-top:10px' }, [...expiredGroups.values()].map((r) => h('div', { class: 'list-item' }, h('div', null, `${r.sku} · ${r.product_name}`, h('div', { class: 'small muted' }, r.warehouse_name)), h('button', { class: 'danger small', onclick: (e) => busy(e.target, async () => {
                 if (!confirm(`Write off all expired ${r.sku} at ${r.warehouse_name}?`)) return;
@@ -3157,7 +3498,7 @@
     draw();
     return page(
       'Uniforms',
-      [isMgmt() || role() === 'account_manager' ? h('button', { onclick: () => rangeForm(() => render()) }, 'New uniform range') : null],
+      [canEditProducts() ? h('button', { onclick: () => rangeForm(() => render()) }, 'New uniform range') : null],
       h('div', { class: 'card' }, h('div', { class: 'filters' }, styleSel), out),
     );
   };

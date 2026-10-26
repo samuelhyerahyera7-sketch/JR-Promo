@@ -100,7 +100,7 @@ function dashboardRoutes(db) {
         .all(...cs.params);
     }
 
-    if (user.role === 'warehouse') {
+    if (user.role === 'warehouse' || user.role === 'warehouse_manager') {
       const whFilter = user.warehouse_id ? 'AND r.warehouse_id = ?' : '';
       const whParams = user.warehouse_id ? [user.warehouse_id] : [];
       out.queue = db

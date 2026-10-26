@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { isManagement } = require('../auth');
+const { isManagement, isStockApprover } = require('../auth');
 const { clientScope } = require('../access');
 const { saToday } = require('../stock');
 const { lowStock } = require('./dashboard');
@@ -18,7 +18,7 @@ function buildReminders(db, user) {
   const add = (r) => out.push(r);
   const role = user.role;
   const mgmt = isManagement(user);
-  const ops = mgmt || role === 'warehouse';
+  const ops = mgmt || role === 'warehouse' || role === 'warehouse_manager';
   const am = role === 'account_manager';
   const promoter = role === 'promoter';
   const today = saToday();
@@ -295,6 +295,67 @@ function buildReminders(db, user) {
         title: `${row.n} activation report(s) from ${row.promoter_name} have no location`,
         detail: 'The phone’s location was off or not allowed, so the store visit can’t be confirmed.',
         link: 'usage',
+      });
+    }
+  }
+
+  // ---- stock counts -------------------------------------------------------
+  if (isStockApprover(user)) {
+    for (const row of db
+      .prepare(
+        `SELECT sc.id, sc.ref, w.name AS warehouse_name, a.name AS counter, COUNT(*) AS n
+         FROM count_lines l JOIN stock_counts sc ON sc.id = l.count_id JOIN warehouses w ON w.id = sc.warehouse_id
+         JOIN users a ON a.id = sc.assigned_to
+         WHERE l.status = 'pending' AND (sc.assigned_to != ? OR ? = 'director')
+         GROUP BY sc.id ORDER BY sc.submitted_at`,
+      )
+      .all(user.id, role)) {
+      add({
+        group: 'stock',
+        severity: 'high',
+        type: 'count_approval',
+        title: `${row.ref}: ${row.n} count difference(s) need your approval`,
+        detail: `Counted by ${row.counter} at ${row.warehouse_name}. Stock isn't adjusted until you decide.`,
+        link: `count/${row.id}`,
+      });
+    }
+  }
+  if (ops) {
+    for (const row of db
+      .prepare(
+        `SELECT sc.id, sc.ref, sc.created_at, w.name AS warehouse_name, COUNT(l.id) AS n FROM stock_counts sc
+         JOIN warehouses w ON w.id = sc.warehouse_id JOIN count_lines l ON l.count_id = sc.id
+         WHERE sc.status = 'open' AND sc.assigned_to = ? GROUP BY sc.id ORDER BY sc.id`,
+      )
+      .all(user.id)) {
+      add({
+        group: 'stock',
+        severity: row.created_at <= new Date(Date.now() - 864e5).toISOString().replace('T', ' ').slice(0, 19) ? 'high' : 'medium',
+        type: 'count_assigned',
+        title: `Count ${row.ref} is waiting for you (${row.n} products)`,
+        detail: `${row.warehouse_name}. Count what is physically there; the system figures are hidden until you submit.`,
+        link: `count/${row.id}`,
+      });
+    }
+  }
+  if (isStockApprover(user)) {
+    for (const row of db
+      .prepare(
+        `SELECT w.name AS warehouse_name, COUNT(*) AS n FROM stock s JOIN warehouses w ON w.id = s.warehouse_id
+         JOIN products p ON p.id = s.product_id
+         WHERE s.qty > 0 AND p.active = 1 AND w.active = 1 AND NOT EXISTS (
+           SELECT 1 FROM count_lines l JOIN stock_counts sc ON sc.id = l.count_id
+           WHERE l.product_id = s.product_id AND sc.warehouse_id = s.warehouse_id AND sc.submitted_at >= ?)
+         GROUP BY w.id ORDER BY n DESC`,
+      )
+      .all(new Date(Date.now() - 90 * 864e5).toISOString())) {
+      add({
+        group: 'stock',
+        severity: 'low',
+        type: 'not_counted',
+        title: `${row.n} stocked product(s) at ${row.warehouse_name} not counted in 90 days`,
+        detail: 'Generate a daily cycle count to work through them.',
+        link: 'count',
       });
     }
   }

@@ -187,9 +187,8 @@ function transfer(db, { productId, fromWarehouseId, toWarehouseId, qty, referenc
   }
 }
 
-/** Stock-take correction: set the counted quantity, ledger records the difference. */
-function adjustTo(db, { productId, warehouseId, countedQty, note, userId }) {
-  const delta = countedQty - warehouseQty(db, productId, warehouseId);
+/** Count correction by a known difference (found +, missing -). The ledger records it as an adjustment. */
+function adjustBy(db, { productId, warehouseId, delta, reference = 'STOCK-TAKE', note, userId }) {
   if (delta === 0) return 0;
   const parts = changeWarehouse(db, productId, warehouseId, delta, { batchNo: 'COUNT-ADJ' });
   for (const part of parts) {
@@ -200,12 +199,17 @@ function adjustTo(db, { productId, warehouseId, countedQty, note, userId }) {
       toWarehouseId: warehouseId,
       batchNo: part.batchNo,
       expiryDate: part.expiryDate,
-      reference: 'STOCK-TAKE',
+      reference,
       note,
       userId,
     });
   }
   return delta;
+}
+
+/** Stock-take correction: set the counted quantity, ledger records the difference. */
+function adjustTo(db, { productId, warehouseId, countedQty, note, userId }) {
+  return adjustBy(db, { productId, warehouseId, delta: countedQty - warehouseQty(db, productId, warehouseId), note, userId });
 }
 
 /** Warehouse sends stock out to a promoter for a campaign. Expired batches are never sent. */
@@ -313,6 +317,7 @@ module.exports = {
   receive,
   transfer,
   adjustTo,
+  adjustBy,
   dispatch,
   returnToWarehouse,
   launder,

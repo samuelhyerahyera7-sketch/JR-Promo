@@ -53,7 +53,9 @@ before(async () => {
     ['office', 'office@jrpromo.test'],
     ['lerato', 'lerato@jrpromo.test'],
     ['pieter', 'pieter@jrpromo.test'],
+    ['manager', 'manager@jrpromo.test'],
     ['warehouse', 'warehouse@jrpromo.test'],
+    ['ashwin', 'ashwin@jrpromo.test'],
     ['nomsa', 'promoter@jrpromo.test'],
     ['kagiso', 'kagiso@jrpromo.test'],
   ]) {
@@ -279,7 +281,10 @@ test('receive, transfer and stock take update stock and the ledger', async () =>
   assert.equal(trf.status, 201);
   assert.equal(qty('PRS-GFT-BAG', 'Durban'), before + 30);
 
-  const count = await call('warehouse', 'POST', '/stock/count', { warehouse_id: dbn, items: [{ product_id: bag, counted: before + 28 }] });
+  // Direct corrections are for managers only, and need a reason
+  assert.equal((await call('warehouse', 'POST', '/stock/count', { warehouse_id: dbn, note: 'x', items: [{ product_id: bag, counted: 0 }] })).status, 403);
+  assert.equal((await call('manager', 'POST', '/stock/count', { warehouse_id: dbn, items: [{ product_id: bag, counted: 0 }] })).status, 400);
+  const count = await call('manager', 'POST', '/stock/count', { warehouse_id: dbn, note: 'Investigated', items: [{ product_id: bag, counted: before + 28 }] });
   assert.deepEqual(count.data.variances, [{ product_id: bag, variance: -2 }]);
   assert.equal(qty('PRS-GFT-BAG', 'Durban'), before + 28);
 
@@ -355,7 +360,8 @@ test('expiry: receiving needs a date, dispatch skips expired batches, earliest e
   // Reminders flag it; writing off removes it
   const reminders = (await call('warehouse', 'GET', '/reminders')).data;
   assert.ok(reminders.some((r) => r.type === 'expired' && r.title.includes('KCC-SMP-SCH')));
-  const wo = await call('warehouse', 'POST', '/stock/write-off-expired', { product_id: sachet, warehouse_id: jhb });
+  assert.equal((await call('warehouse', 'POST', '/stock/write-off-expired', { product_id: sachet, warehouse_id: jhb })).status, 403, 'staff cannot write off');
+  const wo = await call('manager', 'POST', '/stock/write-off-expired', { product_id: sachet, warehouse_id: jhb });
   assert.equal(wo.data.units, 50);
   assert.equal((await call('director', 'GET', `/products/${sachet}`)).data.expired, 0);
 });
@@ -458,6 +464,10 @@ test('older databases are upgraded in place', () => {
   const upgraded = open(file);
   assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
   assert.ok(upgraded.prepare("SELECT badge_code FROM users WHERE email = 'old@x.test'").get().badge_code);
+  // The users table was rebuilt to allow the warehouse manager role, keeping links intact
+  upgraded.prepare("INSERT INTO users (name, email, role, password_hash) VALUES ('WM', 'wm@x.test', 'warehouse_manager', 'x')").run();
+  assert.equal(upgraded.prepare('PRAGMA foreign_key_check').all().length, 0);
+  assert.equal(upgraded.prepare('PRAGMA foreign_keys').get().foreign_keys, 1);
   upgraded.close();
 });
 
@@ -498,6 +508,128 @@ test('geotags are stored on activation reports, handovers and photos', async () 
   assert.equal(up.status, 201);
   const files = (await call('warehouse', 'GET', `/attachments?kind=receipt&reference=GRN-24102&warehouse_id=${jhb}`)).data;
   assert.equal(files[0].lat, midrand.lat);
+});
+
+test('warehouse manager role: runs the floor, manages floor staff, nothing above', async () => {
+  const house = id('SELECT id FROM clients WHERE is_house = 1');
+  const prod = await call('manager', 'POST', '/products', { sku: 'WM-TEST-1', name: 'Test crate', client_id: house, category: 'Equipment' });
+  assert.equal(prod.status, 201, JSON.stringify(prod.data));
+  assert.equal((await call('warehouse', 'POST', '/products', { sku: 'WH-X', name: 'x', client_id: house, category: 'Other' })).status, 403);
+
+  const staff = await call('manager', 'POST', '/users', { name: 'New Picker', email: 'picker@jrpromo.test', role: 'warehouse', password: 'longenough1' });
+  assert.equal(staff.status, 201, JSON.stringify(staff.data));
+  assert.equal((await call('manager', 'POST', '/users', { name: 'X', email: 'x1@jrpromo.test', role: 'director', password: 'longenough1' })).status, 403);
+  assert.equal((await call('manager', 'POST', '/users', { name: 'X', email: 'x2@jrpromo.test', role: 'warehouse_manager', password: 'longenough1' })).status, 403);
+  const lerato = id("SELECT id FROM users WHERE email = 'lerato@jrpromo.test'");
+  assert.equal((await call('manager', 'PATCH', `/users/${lerato}`, { name: 'Hacked' })).status, 403, 'cannot edit an account manager');
+  assert.equal((await call('manager', 'PATCH', `/users/${staff.data.id}`, { role: 'director' })).status, 403, 'cannot promote staff');
+  assert.equal((await call('manager', 'PATCH', `/users/${staff.data.id}`, { active: false })).status, 200);
+  const nomsa = id("SELECT id FROM users WHERE email = 'promoter@jrpromo.test'");
+  assert.equal((await call('manager', 'POST', `/users/${nomsa}/badge`)).status, 200);
+  assert.equal((await call('warehouse', 'POST', '/users', { name: 'X', email: 'x3@jrpromo.test', role: 'promoter', password: 'longenough1' })).status, 403);
+
+  const team = (await call('manager', 'GET', '/users')).data;
+  assert.ok(team.every((u) => ['warehouse_manager', 'warehouse', 'promoter'].includes(u.role)));
+
+  // Sees Rand values, which floor staff don't
+  assert.ok((await call('manager', 'GET', '/dashboard')).data.kpis.stock_value > 0);
+  assert.equal((await call('warehouse', 'GET', '/dashboard')).data.kpis.stock_value, undefined);
+  // Can dispatch like the floor staff
+  assert.ok(Array.isArray((await call('manager', 'GET', '/dashboard')).data.queue));
+});
+
+test('blind stock counts: hidden figures, tolerance, manager approval, no self-approval', async () => {
+  const jhb = id("SELECT id FROM warehouses WHERE name = 'JHB Main'");
+  const sipho = id("SELECT id FROM users WHERE email = 'warehouse@jrpromo.test'");
+  const managerId = id("SELECT id FROM users WHERE email = 'manager@jrpromo.test'");
+  const sku = (s) => id('SELECT id FROM products WHERE sku = ?', s);
+  const [cooler, flag, gazebo] = [sku('JR-EQP-COOL'), sku('JR-SET-FLAG'), sku('JR-SET-GAZ')];
+  await call('manager', 'PUT', '/counts/settings', { tolerance_units: 2, tolerance_value: 1000 });
+
+  const created = await call('manager', 'POST', '/counts', { warehouse_id: jhb, assigned_to: sipho, product_ids: [cooler, flag, gazebo] });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  const cnt = created.data;
+  // A product can't be on two open counts in the same warehouse
+  assert.equal((await call('manager', 'POST', '/counts', { warehouse_id: jhb, assigned_to: sipho, product_ids: [cooler] })).status, 409);
+
+  // Sipho sees the count, but not the system quantities or costs
+  const blind = (await call('warehouse', 'GET', `/counts/${cnt.id}`)).data;
+  assert.ok(blind.items.every((l) => !('system_qty' in l) && !('variance' in l) && !('unit_cost' in l)));
+  // Other floor staff can't see someone else's count
+  assert.equal((await call('ashwin', 'GET', `/counts/${cnt.id}`)).status, 404);
+
+  const before = { cooler: qty('JR-EQP-COOL', 'JHB Main'), flag: qty('JR-SET-FLAG', 'JHB Main'), gazebo: qty('JR-SET-GAZ', 'JHB Main') };
+  const line = (pid) => cnt.items.find((l) => l.product_id === pid).id;
+  await call('warehouse', 'PUT', `/counts/${cnt.id}/lines`, { lines: [{ id: line(cooler), counted_qty: before.cooler }] });
+  assert.equal((await call('warehouse', 'POST', `/counts/${cnt.id}/submit`)).status, 400, 'every line must be counted');
+  await call('warehouse', 'PUT', `/counts/${cnt.id}/lines`, {
+    lines: [
+      { id: line(flag), counted_qty: before.flag - 1 }, // small: auto-adjusted
+      { id: line(gazebo), counted_qty: before.gazebo - 2 }, // R7 600 missing: needs approval
+    ],
+  });
+  const submitted = (await call('warehouse', 'POST', `/counts/${cnt.id}/submit`)).data;
+  const st = (pid) => submitted.items.find((l) => l.product_id === pid);
+  assert.equal(st(cooler).status, 'matched');
+  assert.equal(st(flag).status, 'auto');
+  assert.equal(st(gazebo).status, 'pending');
+  assert.equal(st(gazebo).variance, -2);
+  assert.equal(qty('JR-SET-FLAG', 'JHB Main'), before.flag - 1, 'auto-adjusted');
+  assert.equal(qty('JR-SET-GAZ', 'JHB Main'), before.gazebo, 'big difference waits for approval');
+  assert.equal(submitted.status, 'submitted');
+  assert.equal((await call('warehouse', 'PUT', `/counts/${cnt.id}/lines`, { lines: [] })).status, 409, 'locked after submit');
+
+  // Staff can't approve; manager sees it in reminders and must give a reason to reject
+  assert.equal((await call('warehouse', 'POST', `/counts/${cnt.id}/decide`, { decisions: [{ line_id: st(gazebo).id, approve: true }] })).status, 403);
+  assert.ok((await call('manager', 'GET', '/reminders')).data.some((r) => r.type === 'count_approval' && r.title.includes(cnt.ref)));
+  assert.equal((await call('manager', 'POST', `/counts/${cnt.id}/decide`, { decisions: [{ line_id: st(gazebo).id, approve: false }] })).status, 400);
+  const decided = (await call('manager', 'POST', `/counts/${cnt.id}/decide`, { decisions: [{ line_id: st(gazebo).id, approve: true }] })).data;
+  assert.equal(decided.status, 'closed');
+  assert.equal(qty('JR-SET-GAZ', 'JHB Main'), before.gazebo - 2);
+  const adj = db.prepare("SELECT note, user_id FROM movements WHERE reference = ? AND product_id = ?").get(cnt.ref, gazebo);
+  assert.match(adj.note, /Counted by Sipho Nkosi, approved by Bongani Mthembu/);
+  assert.equal(adj.user_id, managerId);
+
+  // A manager can't approve their own count; a director can
+  const own = (await call('manager', 'POST', '/counts', { warehouse_id: jhb, assigned_to: managerId, product_ids: [gazebo] })).data;
+  await call('manager', 'PUT', `/counts/${own.id}/lines`, { lines: [{ id: own.items[0].id, counted_qty: qty('JR-SET-GAZ', 'JHB Main') + 3 }] });
+  const ownSub = (await call('manager', 'POST', `/counts/${own.id}/submit`)).data;
+  assert.equal(ownSub.can_decide, false);
+  assert.equal((await call('manager', 'POST', `/counts/${own.id}/decide`, { decisions: [{ line_id: own.items[0].id, approve: true }] })).status, 403);
+  assert.equal((await call('director', 'POST', `/counts/${own.id}/decide`, { decisions: [{ line_id: own.items[0].id, approve: false, note: 'Recheck' }] })).status, 200);
+
+  // Shrinkage report shows the approved loss against Sipho's counting
+  const report = (await call('manager', 'GET', '/reports/shrinkage')).data;
+  const gz = report.by_product.find((p) => p.sku === 'JR-SET-GAZ');
+  assert.ok(gz.missing >= 2);
+  assert.ok(report.totals.missing_value >= 7600);
+  const siphoRow = report.by_counter.find((r) => r.name === 'Sipho Nkosi');
+  assert.ok(siphoRow.differences >= 2);
+  assert.equal((await call('warehouse', 'GET', '/reports/shrinkage')).status, 403);
+});
+
+test('cycle counts pick the longest-uncounted stock and support recounts', async () => {
+  const dbn = id("SELECT id FROM warehouses WHERE name = 'Durban'");
+  const ashwin = id("SELECT id FROM users WHERE email = 'ashwin@jrpromo.test'");
+  const managerId = id("SELECT id FROM users WHERE email = 'manager@jrpromo.test'");
+  const cyc = await call('manager', 'POST', '/counts/cycle', { warehouse_id: dbn, assigned_to: ashwin, lines: 5 });
+  assert.equal(cyc.status, 201, JSON.stringify(cyc.data));
+  assert.equal(cyc.data.kind, 'cycle');
+  assert.ok(cyc.data.items.length > 0 && cyc.data.items.length <= 5);
+  // Seeded open Durban count already holds these, so the cycle count must skip them
+  const onOpen = db.prepare(`SELECT l.product_id FROM count_lines l JOIN stock_counts sc ON sc.id = l.count_id
+    WHERE sc.status = 'open' AND sc.warehouse_id = ? AND sc.id != ?`).all(dbn, cyc.data.id).map((r) => r.product_id);
+  assert.ok(cyc.data.items.every((l) => !onOpen.includes(l.product_id)));
+
+  const lines = cyc.data.items.map((l, i) => ({ id: l.id, counted_qty: qty(db.prepare('SELECT sku FROM products WHERE id = ?').get(l.product_id).sku, 'Durban') + (i === 0 ? 50 : 0) }));
+  await call('ashwin', 'PUT', `/counts/${cyc.data.id}/lines`, { lines });
+  const sub = (await call('ashwin', 'POST', `/counts/${cyc.data.id}/submit`)).data;
+  const pending = sub.items.filter((l) => l.status === 'pending');
+  assert.equal(pending.length, 1);
+  const re = await call('manager', 'POST', `/counts/${cyc.data.id}/recount`, { line_ids: [pending[0].id], assigned_to: managerId });
+  assert.equal(re.status, 201, JSON.stringify(re.data));
+  assert.equal(re.data.items[0].product_id, pending[0].product_id);
+  assert.equal((await call('manager', 'GET', `/counts/${cyc.data.id}`)).data.status, 'closed');
 });
 
 // Runs last so it checks the ledger after every other test has moved stock

@@ -204,6 +204,10 @@ button.small, .btn.small { padding: 5px 10px; font-size: 0.85rem; }
 .badge.laundered { background: #dff5e7; color: var(--ok); }
 .badge.write_off { background: #fde6e3; color: var(--danger); }
 .text-danger { color: var(--danger); }
+.text-ok { color: var(--ok); }
+.blind-note { background: #eef4ff; color: #2b4f86; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; font-weight: 600; }
+.decide-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.decide-bar select { width: auto; }
 
 .modal.wide { width: min(980px, 100%); }
 .checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }

@@ -1,6 +1,6 @@
 'use strict';
 
-const { HttpError, isManagement } = require('./auth');
+const { HttpError, isManagement, isWarehouse } = require('./auth');
 
 /**
  * Row-level access rules:
@@ -11,7 +11,7 @@ const { HttpError, isManagement } = require('./auth');
  */
 
 function canSeeCampaign(db, user, campaign) {
-  if (isManagement(user) || user.role === 'warehouse') return true;
+  if (isManagement(user) || isWarehouse(user)) return true;
   if (user.role === 'account_manager') return campaign.account_manager_id === user.id;
   if (user.role === 'promoter') {
     return !!db
@@ -38,7 +38,7 @@ function assertCampaign(db, user, campaignId, { manage = false } = {}) {
 
 /** SQL fragment + params restricting a query on alias `c` (campaigns) to what the user may see. */
 function campaignScope(user, alias = 'c') {
-  if (isManagement(user) || user.role === 'warehouse') return { sql: '1=1', params: [] };
+  if (isManagement(user) || isWarehouse(user)) return { sql: '1=1', params: [] };
   if (user.role === 'account_manager') return { sql: `${alias}.account_manager_id = ?`, params: [user.id] };
   return {
     sql: `EXISTS (SELECT 1 FROM campaign_promoters cp WHERE cp.campaign_id = ${alias}.id AND cp.promoter_id = ?)`,

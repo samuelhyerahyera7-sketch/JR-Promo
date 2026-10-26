@@ -20,10 +20,5 @@
       "source": "/vendor/(.*)",
       "destination": "/api"
     }
-  ],
-  "git": {
-    "deploymentEnabled": {
-      "claude/intelligent-darwin-a9tafs": false
-    }
-  }
+  ]
 }

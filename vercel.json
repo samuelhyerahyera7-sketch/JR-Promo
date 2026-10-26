@@ -1,0 +1,16 @@
+{
+  "framework": null,
+  "buildCommand": "",
+  "outputDirectory": "public",
+  "regions": ["cpt1"],
+  "functions": {
+    "api/index.js": {
+      "includeFiles": "node_modules/jsqr/dist/**",
+      "maxDuration": 30
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api" },
+    { "source": "/vendor/(.*)", "destination": "/api" }
+  ]
+}

@@ -134,6 +134,10 @@ ADMIN_EMAIL=you@jrpromotions.co.za ADMIN_PASSWORD='a-strong-password' ADMIN_NAME
 
 Then sign in and set up, in this order: **Warehouses → Staff & users → Clients → Products** (from Stock on hand), then **Receive stock** to load opening balances.
 
+### Online demo (Vercel)
+
+`api/index.js` and `vercel.json` let the app run on Vercel as a **demo**: the database lives in the function's temporary storage and is refilled with demo data whenever a fresh instance starts, so nothing entered is kept. Use it to try things out, not for real stock.
+
 ### Configuration
 
 | Variable | Default | Purpose |

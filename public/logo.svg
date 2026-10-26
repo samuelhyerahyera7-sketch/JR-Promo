@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 170" role="img" aria-label="JR Promotions">
+  <title>JR Promotions</title>
+  <!-- Mark: grey and blue sails inside a black oval -->
+  <g transform="translate(6 10)">
+    <path d="M150 6 C70 6 8 36 8 76 C8 116 70 146 150 146 C230 146 292 116 292 76 C292 36 230 6 150 6 Z" fill="none" stroke="#111" stroke-width="12"/>
+    <path d="M118 14 C64 18 16 42 16 76 C16 100 40 120 76 132 C70 108 74 84 96 64 C106 54 116 46 120 30 Z" fill="#b8babd"/>
+    <path d="M128 18 L128 108 C128 128 110 138 92 138" fill="none" stroke="#111" stroke-width="14" stroke-linecap="round"/>
+    <path d="M162 30 L162 136" fill="none" stroke="#111" stroke-width="14" stroke-linecap="round"/>
+    <path d="M168 30 C214 30 250 44 270 70 C278 82 278 96 266 106 C246 122 206 130 172 132 C204 112 214 86 204 64 C198 50 186 40 168 36 Z" fill="#1ba3dd"/>
+    <path d="M162 28 C210 26 250 40 268 66" fill="none" stroke="#111" stroke-width="10" stroke-linecap="round"/>
+  </g>
+  <!-- Wordmark -->
+  <text x="332" y="122" textLength="690" lengthAdjust="spacingAndGlyphs" font-family="'Helvetica Neue',Arial,sans-serif" font-size="118" font-weight="500" fill="#111">promotions</text>
+</svg>

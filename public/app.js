@@ -803,7 +803,7 @@
       h(
         'aside',
         { class: 'sidebar' },
-        h('div', { class: 'logo' }, h('div', { class: 'mark' }, 'JR'), h('div', null, 'JR Promotions', h('small', null, 'Stock & logistics'))),
+        h('div', { class: 'logo' }, h('img', { class: 'brand-logo', src: 'logo.svg', alt: 'JR Promotions' }), h('small', null, 'Stock & logistics')),
         role() === 'promoter' ? null : h('button', { class: 'scan-btn', onclick: globalScan }, '⌗ Scan QR code'),
         navEl,
         h(
@@ -826,8 +826,8 @@
           'div',
           { class: 'topbar' },
           h('button', { 'aria-label': 'Menu', onclick: () => shell.classList.toggle('nav-open') }, '☰'),
-          h('strong', null, 'JR Promotions'),
-          role() === 'promoter' ? null : h('button', { style: 'margin-left:auto;font-size:1rem', onclick: globalScan, 'aria-label': 'Scan QR code' }, '⌗ Scan'),
+          h('img', { class: 'brand-logo', src: 'logo.svg', alt: 'JR Promotions' }),
+          role() === 'promoter' ? null : h('button', { class: 'scan-top', onclick: globalScan, 'aria-label': 'Scan QR code' }, '⌗ Scan'),
         ),
         (currentMain = h('main', { class: 'main' })),
       ),
@@ -904,7 +904,7 @@
         h(
           'form',
           { class: 'card', onsubmit: doLogin },
-          h('div', { class: 'logo' }, h('div', { class: 'mark' }, 'JR'), h('div', null, 'JR Promotions', h('small', null, 'Stock & logistics system'))),
+          h('div', { class: 'logo' }, h('img', { class: 'brand-logo', src: 'logo.svg', alt: 'JR Promotions' }), h('small', null, 'Stock & logistics system')),
           field('Email', email),
           h('div', { style: 'height:12px' }),
           field('Password', password),
@@ -3753,7 +3753,7 @@
     const draw = () =>
       sheet.replaceChildren(
         ...promoters.filter((p) => picked.has(p.id)).map((p) =>
-          h('div', { class: 'id-badge' }, h('div', { class: 'id-head' }, h('span', { class: 'mark' }, 'JR'), 'JR Promotions · Promoter'), h('div', { class: 'id-body' }, qrImg(`JRU:${p.badge_code}`, 120), h('div', null, h('div', { class: 'id-name' }, p.name), h('div', { class: 'small' }, p.region || ''), h('div', { class: 'small' }, p.phone || ''), p.uniform_size ? h('div', { class: 'small' }, `Uniform: ${GENDER_NAMES[p.gender] || ''} ${p.uniform_size}`) : null))),
+          h('div', { class: 'id-badge' }, h('div', { class: 'id-head' }, h('img', { class: 'brand-logo', src: 'logo.svg', alt: 'JR Promotions' }), 'Promoter'), h('div', { class: 'id-body' }, qrImg(`JRU:${p.badge_code}`, 120), h('div', null, h('div', { class: 'id-name' }, p.name), h('div', { class: 'small' }, p.region || ''), h('div', { class: 'small' }, p.phone || ''), p.uniform_size ? h('div', { class: 'small' }, `Uniform: ${GENDER_NAMES[p.gender] || ''} ${p.uniform_size}`) : null))),
         ),
       );
     draw();
@@ -3782,7 +3782,7 @@
       h(
         'div',
         { class: 'card my-badge' },
-        h('div', { class: 'id-head' }, h('span', { class: 'mark' }, 'JR'), 'JR Promotions · Promoter'),
+        h('div', { class: 'id-head' }, h('img', { class: 'brand-logo', src: 'logo.svg', alt: 'JR Promotions' }), 'Promoter'),
         qrImg(`JRU:${me.badge_code}`, 240),
         h('div', { class: 'id-name' }, me.name),
         h('div', { class: 'muted' }, [me.region, me.uniform_size ? `Uniform ${GENDER_NAMES[me.gender] || ''} ${me.uniform_size}` : null].filter(Boolean).join(' · ')),

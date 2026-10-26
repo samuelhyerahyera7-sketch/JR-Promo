@@ -232,6 +232,10 @@ function lastDispatchedBatch(db, productId, promoterId, campaignId) {
     .get(productId, promoterId, campaignId);
 }
 
+// Ledger notes that tell damage on return apart from damage in the field (the BA form reports them separately)
+const DAMAGED_ON_RETURN = 'Damaged on return';
+const DAMAGED_IN_FIELD = 'Damaged in field';
+
 /**
  * Promoter stock comes back into a warehouse. Good units go back on the shelf,
  * uniforms that need washing/ironing go to laundry, damaged units are written off.
@@ -249,7 +253,7 @@ function returnToWarehouse(db, { productId, warehouseId, promoterId, campaignId,
     record(db, { type: 'laundry', productId, qty: qtyLaundry, toWarehouseId: warehouseId, promoterId, campaignId, reference, note: 'Needs washing / ironing', userId });
   }
   if (qtyDamaged > 0) {
-    record(db, { type: 'damage', productId, qty: qtyDamaged, promoterId, campaignId, reference, note: 'Damaged on return', userId });
+    record(db, { type: 'damage', productId, qty: qtyDamaged, promoterId, campaignId, reference, note: DAMAGED_ON_RETURN, userId });
   }
 }
 
@@ -286,7 +290,7 @@ function consume(db, { productId, promoterId, campaignId, qtyUsed, qtyDamaged, r
   changeField(db, productId, promoterId, campaignId, -(qtyUsed + qtyDamaged));
   if (qtyUsed > 0) record(db, { type: 'usage', productId, qty: qtyUsed, promoterId, campaignId, reference, userId });
   if (qtyDamaged > 0) {
-    record(db, { type: 'damage', productId, qty: qtyDamaged, promoterId, campaignId, reference, note: 'Damaged in field', userId });
+    record(db, { type: 'damage', productId, qty: qtyDamaged, promoterId, campaignId, reference, note: DAMAGED_IN_FIELD, userId });
   }
 }
 
@@ -309,6 +313,8 @@ function setTracking(db, productId, on) {
 }
 
 module.exports = {
+  DAMAGED_ON_RETURN,
+  DAMAGED_IN_FIELD,
   saToday,
   warehouseQty,
   expiredQty,

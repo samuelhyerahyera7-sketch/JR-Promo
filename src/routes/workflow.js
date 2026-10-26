@@ -57,6 +57,9 @@ function availableIn(db, productId, warehouseId, excludeRequestId = 0) {
 
 const SIGNATURE_PREFIX = 'data:image/png;base64,';
 
+/** Condition stock was in when it changed hands, as on the BA form. */
+const stockCondition = (value) => v.oneOf(value || undefined, 'Condition of the stock', ['good', 'average', 'poor']);
+
 function signature(value, { required = false } = {}) {
   if (!value) {
     if (required) throw new HttpError(400, 'The promoter needs to sign for this stock');
@@ -75,7 +78,7 @@ function recordHandover(db, h) {
   return db
     .prepare(
       `INSERT INTO handovers (kind, request_id, return_id, promoter_id, staff_id, warehouse_id, signature,
-         uniform_clean, uniform_ironed, note, lat, lng, accuracy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         uniform_clean, uniform_ironed, note, lat, lng, accuracy, stock_condition) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       h.kind,
@@ -91,13 +94,14 @@ function recordHandover(db, h) {
       h.location ? h.location.lat : null,
       h.location ? h.location.lng : null,
       h.location ? h.location.accuracy : null,
+      h.condition ?? null,
     ).lastInsertRowid;
 }
 
 const HANDOVER_SELECT = `
   SELECT h.id, h.kind, h.request_id, h.return_id, h.promoter_id, h.staff_id, h.warehouse_id,
          h.uniform_clean, h.uniform_ironed, h.note, h.created_at, (h.signature IS NOT NULL) AS signed,
-         h.lat, h.lng, h.accuracy,
+         h.lat, h.lng, h.accuracy, h.stock_condition,
          pr.name AS promoter_name, pr.phone AS promoter_phone, st.name AS staff_name, st.role AS staff_role,
          w.name AS warehouse_name, rq.ref AS request_ref, rt.ref AS return_ref
   FROM handovers h
@@ -372,6 +376,7 @@ function requestRoutes(db) {
         uniformIroned: uniforms ? true : null,
         note: v.str(handover.note, 'Note'),
         location: v.geo(handover.location),
+        condition: stockCondition(handover.condition),
       });
     });
     res.json(loadRequest(db, req.user, request.id));
@@ -500,6 +505,7 @@ function receiveReturn(db, user, ret, countsInput, handover = {}) {
     uniformIroned: uniformLines ? needsLaundry === 0 : null,
     note: v.str(handover.note, 'Note'),
     location: v.geo(handover.location),
+    condition: stockCondition(handover.condition),
   });
 }
 
@@ -756,4 +762,4 @@ function usageRoutes(db) {
   return r;
 }
 
-module.exports = { requestRoutes, returnRoutes, usageRoutes, handoverRoutes, counterRoutes, availableIn };
+module.exports = { requestRoutes, returnRoutes, usageRoutes, handoverRoutes, counterRoutes, availableIn, loadRequest, loadReturn };

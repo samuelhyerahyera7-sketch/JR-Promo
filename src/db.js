@@ -519,6 +519,42 @@ const MIGRATIONS = [
   );
   CREATE INDEX idx_scan_checks_ref ON scan_checks(kind, reference);
   `,
+
+  // v7: BA collection/return form (ID number, stock condition, manager check, cleared for payment) and messaging
+  `
+  ALTER TABLE users ADD COLUMN id_number TEXT;
+  ALTER TABLE handovers ADD COLUMN stock_condition TEXT CHECK (stock_condition IN ('good','average','poor'));
+
+  -- Office use on the BA form: one per promoter per campaign
+  CREATE TABLE ba_clearances (
+    campaign_id INTEGER NOT NULL REFERENCES campaigns(id),
+    promoter_id INTEGER NOT NULL REFERENCES users(id),
+    checked_by INTEGER REFERENCES users(id),
+    checked_at TEXT,
+    check_comment TEXT,
+    cleared_by INTEGER REFERENCES users(id),
+    cleared_at TEXT,
+    clear_comment TEXT,
+    PRIMARY KEY (campaign_id, promoter_id)
+  );
+
+  -- Messages. thread is 'request:<id>', 'setup:<id>', 'return:<id>', 'campaign:<id>' (team chat),
+  -- 'dm:<lowId>:<highId>' (between two people) or 'notice' (notice board for everyone)
+  CREATE TABLE messages (
+    id INTEGER PRIMARY KEY,
+    thread TEXT NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX idx_messages_thread ON messages(thread, id);
+  CREATE TABLE message_reads (
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    thread TEXT NOT NULL,
+    last_read_id INTEGER NOT NULL,
+    PRIMARY KEY (user_id, thread)
+  );
+  `,
 ];
 
 function migrate(db) {

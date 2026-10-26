@@ -77,6 +77,21 @@ Worked out live and cleared automatically once dealt with:
 - The stock can't be released until the scans match what's going out. If labels are damaged, only the **warehouse manager** (or office/directors) can release it without a full scan, with a reason. Floor staff can't.
 - Every scan is logged with who did it, and each request and setup shows "✓ Scanned out" or "Not fully scanned", with the reason and the differences.
 
+### BA collection / return form
+- Every promoter (BA) has a **BA form** per campaign, laid out like the paper collection/return form: BA details (name, surname, **ID number**, cell, campaign), stock details (qty issued, description, stock code, size, used, qty returned, date returned, still out), the **BA signatures** at issue and return with the **condition** of the stock (good / average / poor), and **office use**: stock issued by, manager check, stock received by, **cleared for payment by**.
+- It fills itself in from what actually happened: counter issues, dispatches, setup load-outs, activation reports and returns. Print it from the request, return or campaign page.
+- Warehouse staff tick the stock's condition when they hand stock over and when it comes back.
+- The warehouse manager (or office) does the **manager check** and **clears the promoter for payment**. Clearing is refused while anything is still out, and a reminder appears once a finished campaign's promoter has brought everything back.
+- ID numbers are personal information: only the promoter, management and the warehouse manager see them (not account managers or floor staff).
+
+### Messages
+- **Chat on every request, setup and return**, at the bottom of its page. Everyone working on it sees it: the promoter, account manager, warehouse and office.
+- **Team chat per campaign** for the promoters, account manager, warehouse and office on it.
+- **Direct messages** between two people. Promoters can message staff but not each other (their numbers stay private); not even directors can read other people's direct messages.
+- A **notice board** everyone reads; directors, office, account managers and the warehouse manager post on it. Unread notices show at the top of the dashboard.
+- **Messages** in the menu lists every conversation with unread counts. Open chats check for new messages every 15 seconds.
+- **WhatsApp** buttons next to phone numbers (requests, setups, campaigns, BA forms, direct messages) open a WhatsApp chat with a message ready to send.
+
 ### Waybill and delivery photos
 - When booking in a delivery, snap the **waybill or delivery note** with the phone camera (or attach a PDF). More photos can be added later under **Deliveries & waybills**, which lists every delivery and flags any without photos.
 - Promoters can photograph the courier waybill when confirming a delivery; warehouse staff can add photos to returns (e.g. damage).
@@ -167,7 +182,7 @@ Set a `SESSION_SECRET` environment variable there: logins then use signed tokens
 npm test
 ```
 
-The tests run the API end to end against an in-memory database: the full request → approve → issue (signature + uniform check) → use → return (with laundry) cycle, expiry batches and first-expiry-first-out picking, packs and scanning stock out, uniform ranges, QR/badge scanning, waybill uploads, campaign plans and kits, role permissions, transaction rollback, upgrading an older database, and a final check that the ledger reconciles with warehouse, field and laundry stock (and batch totals) for every product.
+The tests run the API end to end against an in-memory database: the full request → approve → issue (signature + uniform check) → use → return (with laundry) cycle, expiry batches and first-expiry-first-out picking, packs and scanning stock out, BA forms and clearing for payment, message access rules, uniform ranges, QR/badge scanning, waybill uploads, campaign plans and kits, role permissions, transaction rollback, upgrading an older database, and a final check that the ledger reconciles with warehouse, field and laundry stock (and batch totals) for every product.
 
 ### Project layout
 
@@ -181,6 +196,8 @@ src/
   colours.js        campaign shelf colours
   stock.js          all stock changes and ledger writes go through here (batches, laundry, write-offs)
   scanout.js        reading label codes (items, packs) and checking scans as stock leaves
+  routes/baforms.js BA collection/return form, manager check, cleared for payment
+  routes/messages.js conversations (job chats, campaign teams, direct messages, notice board)
   routes/
     admin.js        login, users, warehouses, clients
     inventory.js    products, receive, transfer, stock take, ledger, CSV

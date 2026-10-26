@@ -816,6 +816,96 @@ test('packs have their own QR codes and count as many units when scanned out', a
   assert.equal((await call('warehouse', 'GET', '/scan?code=JRK:TST-CAN:6')).status, 404);
 });
 
+test('BA collection/return form: issue condition, private ID numbers, manager check and clearing for payment', async () => {
+  const juice = id("SELECT id FROM campaigns WHERE name = 'Sunfresh Summer Tastings'");
+  const sauce = id("SELECT id FROM campaigns WHERE name = 'Braai Master Heritage Month'");
+  const nomsa = id("SELECT id FROM users WHERE email = 'promoter@jrpromo.test'");
+  const cups = id("SELECT id FROM products WHERE sku = 'SFJ-CUP-50'");
+  const jhb = id("SELECT id FROM warehouses WHERE name = 'JHB Main'");
+
+  // Condition is recorded when stock is handed over
+  const req = await call('lerato', 'POST', '/requests', { campaign_id: juice, promoter_id: nomsa, warehouse_id: jhb, items: [{ product_id: cups, qty: 1 }] });
+  assert.equal(req.status, 201, JSON.stringify(req.data));
+  const bad = await call('warehouse', 'POST', `/requests/${req.data.id}/dispatch`, { handover: { signature: SIG, condition: 'bad' }, scans: scans('SFJ-CUP-50', 1) });
+  assert.equal(bad.status, 400);
+  const ok = await call('warehouse', 'POST', `/requests/${req.data.id}/dispatch`, { handover: { signature: SIG, condition: 'average' }, scans: scans('SFJ-CUP-50', 1) });
+  assert.equal(ok.status, 200, JSON.stringify(ok.data));
+
+  const form = (await call('manager', 'GET', `/baforms/${juice}/${nomsa}`)).data;
+  assert.match(form.promoter.id_number, /^\d{13}$/);
+  const cupLine = form.lines.find((l) => l.sku === 'SFJ-CUP-50');
+  assert.ok(cupLine.issued >= 1);
+  assert.equal(cupLine.issued, cupLine.used + cupLine.damaged_in_field + cupLine.returned + cupLine.outstanding, 'every unit is accounted for');
+  assert.equal(form.issued_handovers.at(-1).stock_condition, 'average');
+  assert.equal(form.issued_handovers.at(-1).staff_name, 'Sipho Nkosi');
+
+  // ID numbers are personal: the promoter and the office see them, the account manager doesn't
+  assert.equal((await call('nomsa', 'GET', `/baforms/${juice}/${nomsa}`)).data.promoter.id_number, form.promoter.id_number);
+  assert.equal((await call('lerato', 'GET', `/baforms/${juice}/${nomsa}`)).data.promoter.id_number, undefined);
+  assert.equal((await call('kagiso', 'GET', `/baforms/${juice}/${nomsa}`)).status, 404, "another promoter's form");
+  assert.ok((await call('lerato', 'GET', '/users?role=promoter')).data.every((u) => u.id_number === undefined));
+
+  // Office use: only the warehouse manager / office sign off, and not while stock is still out
+  assert.equal((await call('warehouse', 'POST', `/baforms/${juice}/${nomsa}/check`, {})).status, 403);
+  const checked = await call('manager', 'POST', `/baforms/${juice}/${nomsa}/check`, { comment: 'Matches the slip' });
+  assert.equal(checked.data.clearance.checked_by_name, 'Bongani Mthembu');
+  const early = await call('manager', 'POST', `/baforms/${juice}/${nomsa}/clear`, {});
+  assert.equal(early.status, 409);
+  assert.match(early.data.error, /still has/);
+
+  // The finished campaign: whoever brought everything back is cleared, whoever still holds stock isn't
+  const list = (await call('manager', 'GET', `/baforms?campaign_id=${sauce}`)).data;
+  assert.ok(list.some((x) => x.outstanding === 0 && x.cleared_at));
+  assert.ok(list.some((x) => x.outstanding > 0 && !x.cleared_at));
+  assert.equal((await call('nomsa', 'GET', `/baforms?campaign_id=${juice}`)).data.length, 1, 'promoters only see their own');
+
+  // Everything back but not cleared yet: the warehouse manager gets a reminder, and can clear it
+  const done = list.find((x) => x.outstanding === 0 && x.cleared_at);
+  db.prepare('UPDATE ba_clearances SET cleared_at = NULL, cleared_by = NULL WHERE campaign_id = ? AND promoter_id = ?').run(sauce, done.promoter_id);
+  const reminder = (await call('manager', 'GET', '/reminders')).data.find((x) => x.type === 'ba_clear');
+  assert.equal(reminder.link, `baform/${sauce}~${done.promoter_id}`);
+  assert.ok(!(await call('warehouse', 'GET', '/reminders')).data.some((x) => x.type === 'ba_clear'), 'floor staff do not clear for payment');
+  const cleared = await call('manager', 'POST', `/baforms/${sauce}/${done.promoter_id}/clear`, { comment: 'All back' });
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.data));
+  assert.equal(cleared.data.clearance.cleared_by_name, 'Bongani Mthembu');
+  assert.equal((await call('manager', 'POST', `/baforms/${sauce}/${done.promoter_id}/clear`, {})).status, 409, 'only once');
+});
+
+test('messages: job chats, campaign team, direct messages and the notice board follow access rules', async () => {
+  const nomsa = id("SELECT id FROM users WHERE email = 'promoter@jrpromo.test'");
+  const kagiso = id("SELECT id FROM users WHERE email = 'kagiso@jrpromo.test'");
+  const sipho = id("SELECT id FROM users WHERE email = 'warehouse@jrpromo.test'");
+  const req = db.prepare('SELECT id FROM requests WHERE promoter_id = ? ORDER BY id DESC').get(nomsa);
+  const thread = `request:${req.id}`;
+
+  const before = (await call('warehouse', 'GET', '/messages/unread')).data.count;
+  assert.equal((await call('nomsa', 'POST', '/messages', { thread, body: 'Is my stock ready?' })).status, 201);
+  assert.equal((await call('warehouse', 'GET', '/messages/unread')).data.count, before + 1, 'warehouse sees the new message');
+  const opened = (await call('warehouse', 'GET', `/messages/thread?thread=${thread}`)).data;
+  assert.equal(opened.messages.at(-1).body, 'Is my stock ready?');
+  assert.equal(opened.messages.at(-1).user_name, 'Nomsa Khumalo');
+  assert.equal((await call('warehouse', 'GET', '/messages/unread')).data.count, before, 'reading clears it');
+  assert.equal((await call('kagiso', 'GET', `/messages/thread?thread=${thread}`)).status, 404, "not Kagiso's request");
+  assert.equal((await call('kagiso', 'POST', '/messages', { thread, body: 'hi' })).status, 404);
+
+  // Notice board: everyone reads, managers and office post
+  assert.equal((await call('nomsa', 'POST', '/messages', { thread: 'notice', body: 'x' })).status, 403);
+  assert.equal((await call('manager', 'POST', '/messages', { thread: 'notice', body: 'Stock take on Friday' })).status, 201);
+  assert.equal((await call('kagiso', 'GET', '/messages/thread?thread=notice')).data.messages.at(-1).body, 'Stock take on Friday');
+
+  // Direct messages: promoters message staff, not each other; nobody else can read them
+  assert.equal((await call('nomsa', 'POST', '/messages', { to: kagiso, body: 'hey' })).status, 403);
+  const dm = await call('nomsa', 'POST', '/messages', { to: sipho, body: 'Running 10 minutes late' });
+  assert.equal(dm.status, 201);
+  const inbox = (await call('warehouse', 'GET', '/messages/inbox')).data;
+  const conv = inbox.find((t) => t.thread === dm.data.thread);
+  assert.equal(conv.title, 'Nomsa Khumalo');
+  assert.equal(conv.unread, 1);
+  assert.equal((await call('lerato', 'GET', `/messages/thread?thread=${dm.data.thread}`)).status, 404);
+  assert.ok(!(await call('director', 'GET', '/messages/inbox')).data.some((t) => t.thread === dm.data.thread), 'not even directors read DMs');
+  assert.ok((await call('nomsa', 'GET', '/messages/people')).data.every((p) => p.role !== 'promoter'));
+});
+
 test('signed sessions work across separate copies of the app (serverless demo)', async () => {
   process.env.SESSION_SECRET = 'test-secret-for-two-copies';
   const copies = [];

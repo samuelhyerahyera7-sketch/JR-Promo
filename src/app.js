@@ -13,6 +13,8 @@ const { qrRoutes, kitRoutes } = require('./routes/misc');
 const { reminderRoutes } = require('./routes/reminders');
 const { countRoutes, reportRoutes } = require('./routes/counts');
 const { setupRoutes } = require('./routes/setups');
+const { baFormRoutes } = require('./routes/baforms');
+const { messageRoutes } = require('./routes/messages');
 
 function createApp(db) {
   const app = express();
@@ -53,6 +55,8 @@ function createApp(db) {
   api.use('/counts', countRoutes(db));
   api.use('/reports', reportRoutes(db));
   api.use('/setups', setupRoutes(db));
+  api.use('/baforms', baFormRoutes(db));
+  api.use('/messages', messageRoutes(db));
   api.use('/', qrRoutes(db));
   app.use('/api', api);
 

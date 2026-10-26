@@ -7,8 +7,15 @@ const v = require('../validate');
 const { clientScope } = require('../access');
 
 const USER_COLUMNS =
-  'u.id, u.name, u.email, u.phone, u.role, u.region, u.warehouse_id, u.gender, u.uniform_size, u.badge_code, u.active, u.created_at';
+  'u.id, u.name, u.email, u.phone, u.role, u.region, u.warehouse_id, u.gender, u.uniform_size, u.badge_code, u.id_number, u.active, u.created_at';
 const newBadge = () => crypto.randomBytes(10).toString('hex');
+
+/** SA (13 digits), Namibian (11) or passport numbers: letters and digits only. */
+function idNumber(value) {
+  const id = v.str(value, 'ID / passport number', { max: 20 });
+  if (id && !/^[A-Za-z0-9]{6,20}$/.test(id.replace(/\s/g, ''))) throw new HttpError(400, 'ID / passport number can only contain letters and digits');
+  return id ? id.replace(/\s/g, '').toUpperCase() : null;
+}
 
 function authRoutes(db) {
   const r = express.Router();
@@ -89,6 +96,8 @@ function userRoutes(db) {
       )
       .all(...params);
     if (req.user.role === 'account_manager') for (const row of rows) delete row.badge_code;
+    // ID numbers are personal information: only management and the warehouse manager see them
+    if (!USER_ADMINS.includes(req.user.role) && !isManagement(req.user)) for (const row of rows) delete row.id_number;
     res.json(rows);
   });
 
@@ -101,8 +110,8 @@ function userRoutes(db) {
     if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) throw new HttpError(409, 'That email is already in use');
     const info = db
       .prepare(
-        `INSERT INTO users (name, email, phone, role, region, warehouse_id, gender, uniform_size, badge_code, password_hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO users (name, email, phone, role, region, warehouse_id, gender, uniform_size, badge_code, password_hash, id_number)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         v.str(b.name, 'Name', { required: true }),
@@ -115,6 +124,7 @@ function userRoutes(db) {
         v.str(b.uniform_size, 'Uniform size', { max: 10 }),
         newBadge(),
         hashPassword(password),
+        idNumber(b.id_number),
       );
     res.status(201).json(getUser(db, info.lastInsertRowid));
   });
@@ -134,6 +144,7 @@ function userRoutes(db) {
       gender: b.gender !== undefined ? v.oneOf(b.gender, 'Gender', ['female', 'male']) : user.gender,
       uniform_size: b.uniform_size !== undefined ? v.str(b.uniform_size, 'Uniform size', { max: 10 }) : user.uniform_size,
       active: b.active !== undefined ? (b.active ? 1 : 0) : user.active,
+      id_number: b.id_number !== undefined ? idNumber(b.id_number) : user.id_number,
     };
     assertCanManageRole(req.user, fields.role);
     if (id === req.user.id && (fields.active === 0 || fields.role !== user.role)) {
@@ -142,7 +153,7 @@ function userRoutes(db) {
     const clash = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').get(fields.email, id);
     if (clash) throw new HttpError(409, 'That email is already in use');
     db.prepare(
-      'UPDATE users SET name=?, email=?, phone=?, role=?, region=?, warehouse_id=?, gender=?, uniform_size=?, active=? WHERE id=?',
+      'UPDATE users SET name=?, email=?, phone=?, role=?, region=?, warehouse_id=?, gender=?, uniform_size=?, active=?, id_number=? WHERE id=?',
     ).run(
       fields.name,
       fields.email,
@@ -153,6 +164,7 @@ function userRoutes(db) {
       fields.gender,
       fields.uniform_size,
       fields.active,
+      fields.id_number,
       id,
     );
     if (b.password) {

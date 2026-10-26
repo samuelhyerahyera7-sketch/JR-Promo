@@ -558,6 +558,100 @@
     };
   }
 
+  /** wa.me number for a cell number: "071 555 0401" → 27715550401 (South Africa unless it has a country code). */
+  function waNumber(phone) {
+    let d = String(phone || '').replace(/\D/g, '');
+    if (d.startsWith('00')) d = d.slice(2);
+    else if (d.startsWith('0')) d = `27${d.slice(1)}`;
+    return d.length >= 10 ? d : null;
+  }
+  /** A "WhatsApp" button that opens a chat with that number, optionally with a message typed in. */
+  function waLink(phone, text) {
+    const n = waNumber(phone);
+    if (!n) return null;
+    return h('a', { class: 'wa-link', href: `https://wa.me/${n}${text ? `?text=${encodeURIComponent(text)}` : ''}`, target: '_blank', rel: 'noopener' }, 'WhatsApp');
+  }
+  const firstName = (name) => String(name || '').split(' ')[0];
+
+  /** Good / Average / Poor, as ticked on the BA collection/return form. */
+  const CONDITIONS = { good: 'Good', average: 'Average', poor: 'Poor' };
+  function conditionPicker(label) {
+    const name = `cond-${Math.random().toString(36).slice(2)}`;
+    const radios = Object.entries(CONDITIONS).map(([value, text]) => {
+      const r = input({ type: 'radio', name, value });
+      r.checked = value === 'good';
+      return h('label', { class: 'check' }, r, text);
+    });
+    return {
+      el: h('div', { class: 'condition' }, h('strong', null, label), h('div', { class: 'condition-opts' }, radios)),
+      value: () => (radios.map((l) => l.querySelector('input')).find((r) => r.checked) || {}).value,
+    };
+  }
+
+  /** Update the Messages count in the menu without re-rendering the page. */
+  async function refreshUnread() {
+    try {
+      state.counts.messages = (await get('/messages/unread')).count;
+      const link = document.querySelector('.nav a[href="#/messages"]');
+      if (!link) return;
+      let badgeEl = link.querySelector('.count');
+      if (!state.counts.messages) return badgeEl && badgeEl.remove();
+      if (!badgeEl) link.append((badgeEl = h('span', { class: 'count' })));
+      badgeEl.textContent = state.counts.messages;
+    } catch {
+      /* cosmetic */
+    }
+  }
+
+  /**
+   * A conversation: about one thing (a request, setup, return or campaign team) or between two people.
+   * Checks for new messages every 15 seconds while it is on screen.
+   */
+  function chatPanel(thread, { title = 'Messages', hint } = {}) {
+    const list = h('div', { class: 'chat-list' });
+    const box = h('textarea', { rows: 2, placeholder: 'Write a message…', maxlength: '2000', class: 'chat-input' });
+    const send = h('button', { type: 'button' }, 'Send');
+    const sendRow = h('div', { class: 'chat-send' }, box, send);
+    const el = h('div', { class: 'chat' }, title ? h('div', { class: 'chat-head' }, h('h2', null, title), hint ? h('div', { class: 'small muted' }, hint) : null) : null, list, sendRow);
+    let lastId = -1;
+    const bubble = (m) =>
+      h('div', { class: `bubble${m.user_id === state.user.id ? ' mine' : ''}` },
+        h('div', { class: 'bubble-meta' }, m.user_id === state.user.id ? 'You' : `${m.user_name} · ${m.role_label}`, ' · ', fmtDateTime(m.created_at)),
+        h('div', { class: 'bubble-body' }, m.body));
+    const load = async () => {
+      const t = await get(`/messages/thread${qs({ thread })}`);
+      sendRow.hidden = !t.can_post;
+      const newest = t.messages.length ? t.messages[t.messages.length - 1].id : 0;
+      if (newest !== lastId) {
+        lastId = newest;
+        list.replaceChildren(...(t.messages.length ? t.messages.map(bubble) : [h('div', { class: 'muted small chat-empty' }, 'No messages yet.')]));
+        list.scrollTop = list.scrollHeight;
+        refreshUnread();
+      }
+    };
+    send.onclick = () =>
+      busy(send, async () => {
+        if (!box.value.trim()) return;
+        await post('/messages', { thread, body: box.value });
+        box.value = '';
+        await load();
+      });
+    box.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) send.click();
+    });
+    load().catch(() => (el.hidden = true));
+    let shown = false;
+    const timer = setInterval(() => {
+      if (!el.isConnected) {
+        if (shown) clearInterval(timer);
+        return;
+      }
+      shown = true;
+      if (!document.hidden) load().catch(() => {});
+    }, 15000);
+    return el;
+  }
+
   /** How a load-out was scanned, for the record. */
   function scanCheckNote(c) {
     if (!c) return null;
@@ -837,7 +931,11 @@
 
   function navItems() {
     const r = role();
-    const items = [{ route: 'dashboard', label: 'Dashboard' }, { route: 'reminders', label: 'Reminders', count: state.counts.reminders }];
+    const items = [
+      { route: 'dashboard', label: 'Dashboard' },
+      { route: 'messages', label: 'Messages', count: state.counts.messages },
+      { route: 'reminders', label: 'Reminders', count: state.counts.reminders },
+    ];
     if (r === 'promoter') {
       items.push(
         { route: 'badge', label: 'My ID badge' },
@@ -904,13 +1002,19 @@
 
   async function refreshCounts() {
     try {
-      const [d, reminders, colours] = await Promise.all([get('/dashboard'), get('/reminders'), Object.keys(COLOURS).length ? null : get('/campaigns/colours')]);
+      const [d, reminders, colours, unread] = await Promise.all([
+        get('/dashboard'),
+        get('/reminders'),
+        Object.keys(COLOURS).length ? null : get('/campaigns/colours'),
+        get('/messages/unread').catch(() => ({ count: 0 })),
+      ]);
       if (colours) COLOURS = Object.fromEntries(colours.map((c) => [c.key, c]));
       state.counts = {
         ...(d.kpis || {}),
         reminders: reminders.filter((x) => x.severity !== 'low').length,
         counts: reminders.filter((x) => x.type === 'count_approval' || x.type === 'count_assigned').length,
         setups: reminders.filter((x) => ['setup_load', 'strike_due', 'setup_not_back', 'setup_unconfirmed'].includes(x.type)).length,
+        messages: unread.count,
       };
       state.lastDashboard = d;
       state.reminders = reminders;
@@ -1194,6 +1298,16 @@
   }
 
   routes.dashboard = async () => {
+    const [el, banner] = await Promise.all([dashboardView(), noticeBanner()]);
+    if (banner) {
+      const head = el.querySelector('.page-head');
+      if (head) head.after(banner);
+      else el.prepend(banner);
+    }
+    return el;
+  };
+
+  async function dashboardView() {
     const d = state.lastDashboard || (await get('/dashboard'));
     if (d.role === 'promoter') return promoterDashboard(d);
     const k = d.kpis;
@@ -2393,6 +2507,7 @@
       const courier = input({ placeholder: 'Courier (e.g. The Courier Guy)' });
       const waybill = input({ placeholder: q.delivery_method === 'courier' ? 'Waybill number (required)' : 'Waybill / reference' });
       const sig = collect ? signaturePad(`${q.promoter_name} signs to confirm they received this stock`) : null;
+      const condition = conditionPicker('Condition of the stock going out');
       const where = locationTag();
       const dispatchBtn = h('button', { class: 'ok big' }, collect ? `Issue to ${q.promoter_name}` : 'Dispatch');
       dispatchBtn.onclick = () =>
@@ -2405,7 +2520,7 @@
             courier: courier.value,
             waybill: waybill.value,
             items: [...dispatchInputs].map(([itemId, el]) => ({ id: itemId, qty_dispatched: el.value })),
-            handover: { signature, uniform_clean: clean.checked, uniform_ironed: ironed.checked, location: (await where.value()) || undefined },
+            handover: { signature, uniform_clean: clean.checked, uniform_ironed: ironed.checked, condition: condition.value(), location: (await where.value()) || undefined },
           });
           toast(collect ? `${q.ref} issued to ${q.promoter_name}` : `${q.ref} dispatched`, 'ok');
           reload();
@@ -2418,6 +2533,7 @@
           h('h2', null, collect ? 'Hand over at the counter' : 'Send out'),
           h('div', { class: 'processing' }, `Processed by ${state.user.name} (${ROLE_NAMES[role()]}) → Promoter: ${q.promoter_name}${q.promoter_size ? ` · uniform ${GENDER_NAMES[q.promoter_gender] || ''} ${q.promoter_size}` : ''}`),
           scanOut.el,
+          condition.el,
           uniformsIn
             ? h('div', { class: 'uniform-check' }, h('strong', null, 'Uniform check'), h('label', { class: 'check' }, clean, 'Uniforms are clean'), h('label', { class: 'check' }, ironed, 'Uniforms are ironed'))
             : null,
@@ -2451,7 +2567,7 @@
     const showPhotos = q.delivery_method !== 'collect' || q.attachments.length;
     return page(
       h('span', null, h('span', { class: 'mono' }, q.ref), ' ', badge(q.status)),
-      [h('a', { class: 'btn secondary', href: '#/requests' }, '← All requests')],
+      [h('a', { class: 'btn secondary', href: `#/baform/${q.campaign_id}~${q.promoter_id}` }, 'BA form'), h('a', { class: 'btn secondary', href: '#/requests' }, '← All requests')],
       h(
         'div',
         { class: 'card' },
@@ -2463,7 +2579,7 @@
             'dl',
             { class: 'dl' },
             h('dt', null, 'Campaign'), h('dd', null, swatch(q.campaign_colour), ' ', h('a', { href: `#/campaigns/${q.campaign_id}` }, q.campaign_name), ` · ${q.client_name}`),
-            h('dt', null, 'Promoter'), h('dd', null, q.promoter_name, q.promoter_phone ? ` · ${q.promoter_phone}` : '', q.promoter_size ? h('div', { class: 'small muted' }, `Uniform size ${GENDER_NAMES[q.promoter_gender] || ''} ${q.promoter_size}`) : null),
+            h('dt', null, 'Promoter'), h('dd', null, q.promoter_name, q.promoter_phone ? ` · ${q.promoter_phone} ` : '', r !== 'promoter' ? waLink(q.promoter_phone, `Hi ${firstName(q.promoter_name)}, about your stock ${q.ref}: `) : null, q.promoter_size ? h('div', { class: 'small muted' }, `Uniform size ${GENDER_NAMES[q.promoter_gender] || ''} ${q.promoter_size}`) : null),
             h('dt', null, 'From'), h('dd', null, q.warehouse_name),
             h('dt', null, 'Needed by'), h('dd', null, fmtDate(q.needed_by)),
             h('dt', null, 'Delivery'), h('dd', null, DELIVERY[q.delivery_method] || q.delivery_method || '—'),
@@ -2486,6 +2602,7 @@
       h('div', { class: 'card' }, h('h2', null, 'Items'), items, actions),
       extra,
       q.handovers.length ? h('div', { class: 'card' }, h('h2', null, 'Handover record'), handoverCards(q.handovers)) : null,
+      h('div', { class: 'card no-print' }, chatPanel(`request:${q.id}`, { title: 'Messages about this request', hint: 'Seen by everyone working on it: the promoter, account manager, warehouse and office.' })),
       showPhotos
         ? h('div', { class: 'card no-print' }, attachmentsPanel({ kind: 'request', request_id: q.id }, q.attachments, {
             canUpload: isOps() || (r === 'promoter' && q.promoter_id === state.user.id),
@@ -2673,6 +2790,7 @@
     const anyUniform = rt.items.some((x) => x.category === 'Uniform');
     const numIn = (v) => input({ type: 'number', min: '0', value: v, style: 'width:80px', inputmode: 'numeric' });
     const sig = receiving ? signaturePad('Promoter signature (if they are here)') : null;
+    const condition = receiving ? conditionPicker('Condition the stock came back in') : null;
     const where = receiving ? locationTag() : null;
     const body = h(
       'div',
@@ -2710,9 +2828,12 @@
         rt.items,
       ),
       receiving ? h('p', { class: 'hint' }, 'Good units go back into stock. Uniforms that aren’t clean and ironed go to the laundry. Damaged units are written off. Anything not counted stays against the promoter.') : null,
+      condition ? condition.el : null,
       sig ? sig.el : null,
       where ? where.el : null,
       handoverCards(rt.handovers),
+      h('div', { style: 'margin-top:14px' }, h('a', { href: `#/baform/${rt.campaign_id}~${rt.promoter_id}` }, 'Open the BA form')),
+      h('div', { style: 'margin-top:14px' }, chatPanel(`return:${rt.id}`, { title: 'Messages about this return' })),
       h('div', { style: 'margin-top:14px' }, attachmentsPanel({ kind: 'return', return_id: rt.id }, rt.attachments, { canUpload: isOps() || role() === 'promoter', title: 'Photos', emptyText: 'No photos' })),
     );
     const buttons = [];
@@ -2722,7 +2843,7 @@
         busy(recv, async () => {
           await post(`/returns/${rt.id}/receive`, {
             items: [...inputs].map(([itemId, i]) => ({ id: itemId, qty_good: i.good.value, qty_laundry: i.laundry.value, qty_damaged: i.bad.value })),
-            handover: { signature: sig.value(), location: (await where.value()) || undefined },
+            handover: { signature: sig.value(), condition: condition.value(), location: (await where.value()) || undefined },
           });
           m.close();
           toast(`${rt.ref} checked in`, 'ok');
@@ -2939,7 +3060,7 @@
   };
 
   async function campaignDetail(id) {
-    const [c, reqs] = await Promise.all([get(`/campaigns/${id}`), get(`/requests${qs({ campaign_id: id })}`)]);
+    const [c, reqs, forms] = await Promise.all([get(`/campaigns/${id}`), get(`/requests${qs({ campaign_id: id })}`), get(`/baforms${qs({ campaign_id: id })}`)]);
     const canManage = isMgmt() || (role() === 'account_manager' && c.account_manager_id === state.user.id);
     const totals = c.summary.reduce(
       (t, x) => ({ dispatched: t.dispatched + x.dispatched, used: t.used + x.used, damaged: t.damaged + x.damaged, returned: t.returned + x.returned, in_field: t.in_field + x.in_field }),
@@ -2983,7 +3104,7 @@
           { class: 'card' },
           h('h2', null, 'Promoters'),
           c.promoters.length
-            ? h('div', { class: 'list' }, c.promoters.map((p) => h('div', { class: 'list-item' }, h('div', null, h('strong', null, p.name), h('div', { class: 'small muted' }, [p.region, p.phone].filter(Boolean).join(' · '))))))
+            ? h('div', { class: 'list' }, c.promoters.map((p) => h('div', { class: 'list-item' }, h('div', null, h('strong', null, p.name), h('div', { class: 'small muted' }, [p.region, p.phone].filter(Boolean).join(' · '))), role() !== 'promoter' ? waLink(p.phone, `Hi ${firstName(p.name)}, about ${c.name}: `) : null)))
             : h('div', { class: 'empty' }, 'No promoters assigned'),
         ),
       ),
@@ -3024,7 +3145,174 @@
           { onRow: (x) => go(`requests/${x.id}`), empty: 'No requests yet' },
         ),
       ),
+      h(
+        'div',
+        { class: 'card' },
+        h('h2', null, role() === 'promoter' ? 'My BA form' : 'BA collection / return forms'),
+        h('p', { class: 'muted small', style: 'margin-top:0' }, 'What each promoter was issued and brought back, with signatures. The warehouse manager clears them for payment once everything is back.'),
+        table(
+          [
+            { label: 'Promoter', key: 'name' },
+            { label: 'Issued', num: true, render: (x) => num(x.issued) },
+            { label: 'Still out', num: true, render: (x) => (x.outstanding ? h('strong', { class: 'text-danger' }, num(x.outstanding)) : '0') },
+            { label: 'Manager check', render: (x) => (x.checked_at ? badge('approved', `✓ ${fmtDate(x.checked_at)}`) : h('span', { class: 'muted' }, '—')) },
+            { label: 'Payment', render: (x) => (x.cleared_at ? badge('delivered', 'Cleared') : x.issued && !x.outstanding ? badge('pending', 'Ready to clear') : h('span', { class: 'muted' }, 'Not yet')) },
+          ],
+          forms,
+          { onRow: (x) => go(`baform/${c.id}~${x.promoter_id}`), empty: 'No promoters on this campaign' },
+        ),
+      ),
+      h('div', { class: 'card' }, chatPanel(`campaign:${c.id}`, { title: 'Team chat', hint: 'Everyone on the campaign: promoters, account manager, warehouse and office.' })),
     );
+  }
+
+  // ------------------------------------------------------------------ BA collection / return form
+
+  routes.baform = async (key) => {
+    const [campaignId, promoterId] = String(key || '').split('~').map(Number);
+    const f = await get(`/baforms/${campaignId}/${promoterId}`);
+    const reload = () => render();
+    const [first, ...rest] = f.promoter.name.split(' ');
+    const lastIssue = f.issued_handovers[f.issued_handovers.length - 1];
+    const lastReturn = f.return_handovers[f.return_handovers.length - 1];
+    const sigBox = (hd) =>
+      hd && hd.signed ? h('img', { class: 'ba-sig', src: `/api/handovers/${hd.id}/signature.png`, alt: 'Signature' }) : h('div', { class: 'ba-sig empty' }, hd ? 'Not signed' : '');
+    const ticks = (hd) =>
+      h('div', { class: 'ba-ticks' }, Object.entries(CONDITIONS).map(([k, label]) => h('span', { class: `ba-tick${hd && hd.stock_condition === k ? ' on' : ''}` }, hd && hd.stock_condition === k ? '☑' : '☐', ' ', label)));
+    const staff = (list) => [...new Set(list.map((x) => x.staff_name).filter(Boolean))].join(', ') || '';
+    const size = (l) => [GENDER_NAMES[l.gender], l.colour, l.size].filter(Boolean).join(' ');
+    const office = (label, who, at, comment) =>
+      h('tr', null, h('th', null, label), h('td', null, who || ''), h('td', null, at ? fmtDate(at) : ''), h('td', null, comment || ''));
+
+    const actions = [];
+    if (f.can_sign_off && !(f.clearance && f.clearance.checked_at) && f.lines.length) {
+      actions.push(h('button', { class: 'secondary', onclick: (e) => busy(e.target, async () => {
+        const comment = prompt('Manager check: any comments? (optional)', '');
+        if (comment === null) return;
+        await post(`/baforms/${campaignId}/${promoterId}/check`, { comment });
+        toast('Manager check recorded', 'ok');
+        reload();
+      }) }, 'Manager check'));
+    }
+    if (f.can_sign_off && !(f.clearance && f.clearance.cleared_at)) {
+      actions.push(h('button', { class: f.outstanding ? 'secondary' : 'ok', onclick: (e) => busy(e.target, async () => {
+        if (f.outstanding) throw new Error(`${f.promoter.name} still has ${num(f.outstanding)} unit(s) out. Book the return or the activation report first.`);
+        const comment = prompt(`Clear ${f.promoter.name} for payment? Add a comment if needed.`, '');
+        if (comment === null) return;
+        await post(`/baforms/${campaignId}/${promoterId}/clear`, { comment });
+        toast(`${f.promoter.name} cleared for payment`, 'ok');
+        reload();
+      }) }, 'Clear for payment'));
+    }
+    if (role() !== 'promoter') actions.push(waLink(f.promoter.phone, `Hi ${first}, about your BA form for ${f.campaign.name}: `));
+    actions.push(h('button', { onclick: () => window.print() }, 'Print'));
+
+    const form = h(
+      'div',
+      { class: 'ba-form' },
+      h('div', { class: 'ba-top' }, h('img', { class: 'brand-logo', src: 'logo.svg', alt: 'JR Promotions' }), h('div', { class: 'ba-title' }, 'BA COLLECTION / RETURN FORM')),
+      h('div', { class: 'ba-band' }, 'BA DETAILS'),
+      h('table', { class: 'ba-details' },
+        h('tr', null, h('th', null, 'Name'), h('td', null, first), h('th', null, 'ID number'), h('td', { class: 'mono' }, f.promoter.id_number || (f.promoter.id_number === undefined ? '(hidden)' : ''))),
+        h('tr', null, h('th', null, 'Surname'), h('td', null, rest.join(' ')), h('th', null, 'Cell number'), h('td', null, f.promoter.phone || '')),
+        h('tr', null, h('th', null, 'Campaign'), h('td', null, f.campaign.name), h('th', null, 'Client'), h('td', null, f.campaign.client_name || '')),
+        h('tr', null, h('th', null, 'Date issued'), h('td', null, f.lines.length ? fmtDate(f.lines.map((l) => l.first_issued_at).sort()[0]) : '—'), h('th', null, 'Uniform'), h('td', null, f.promoter.uniform_size ? `${GENDER_NAMES[f.promoter.gender] || ''} ${f.promoter.uniform_size}` : ''))),
+      h('div', { class: 'ba-band' }, 'STOCK DETAILS'),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'ba-stock' },
+        h('thead', null, h('tr', null, ['Qty issued', 'Description', 'Stock code', 'Size', 'Used', 'Qty returned', 'Date returned', 'Still out'].map((x) => h('th', null, x)))),
+        h('tbody', null, f.lines.length
+          ? f.lines.map((l) => h('tr', { class: l.outstanding ? 'owed' : null },
+              h('td', { class: 'num' }, `${num(l.issued)}x`), h('td', null, l.name), h('td', { class: 'mono' }, l.sku), h('td', null, size(l)),
+              h('td', { class: 'num' }, l.used + l.damaged_in_field ? `${num(l.used)}${l.damaged_in_field ? ` (+${num(l.damaged_in_field)} damaged)` : ''}` : ''),
+              h('td', { class: 'num' }, l.returned ? `${num(l.returned)}${l.returned_damaged ? ` (${num(l.returned_damaged)} damaged)` : ''}` : ''),
+              h('td', null, l.last_returned_at ? fmtDate(l.last_returned_at) : ''),
+              h('td', { class: 'num' }, l.outstanding ? h('strong', null, num(l.outstanding)) : '0')))
+          : h('tr', null, h('td', { colspan: 8, class: 'muted' }, 'Nothing issued yet'))))),
+      h('div', { class: 'ba-sign-grid' },
+        h('div', { class: 'ba-sign' }, h('div', { class: 'ba-label' }, 'BA signature (issued)'), sigBox(lastIssue), h('div', { class: 'ba-label' }, 'Condition in which stock is received'), ticks(lastIssue)),
+        h('div', { class: 'ba-sign' }, h('div', { class: 'ba-label' }, 'BA signature (return)'), sigBox(lastReturn), h('div', { class: 'ba-label' }, 'Condition in which stock is returned'), ticks(lastReturn))),
+      h('div', { class: 'ba-band' }, 'OFFICE USE'),
+      h('table', { class: 'ba-office' },
+        h('thead', null, h('tr', null, h('th', null, ''), h('th', null, 'Name'), h('th', null, 'Date'), h('th', null, 'Comments'))),
+        h('tbody', null,
+          office('Stock issued by', staff(f.issued_handovers), lastIssue && lastIssue.created_at, f.issued_handovers.map((x) => x.ref).filter(Boolean).join(', ')),
+          office('Manager check', f.clearance && f.clearance.checked_by_name, f.clearance && f.clearance.checked_at, f.clearance && f.clearance.check_comment),
+          office('Stock received by', staff(f.return_handovers), lastReturn && lastReturn.created_at, f.return_handovers.map((x) => x.ref).filter(Boolean).join(', ')),
+          office('Cleared for payment by', f.clearance && f.clearance.cleared_by_name, f.clearance && f.clearance.cleared_at, f.clearance && f.clearance.clear_comment))),
+    );
+    return page(
+      h('span', null, 'BA form · ', f.promoter.name),
+      [h('a', { class: 'btn secondary', href: `#/campaigns/${f.campaign.id}` }, '← Campaign'), ...actions.filter(Boolean)],
+      f.outstanding
+        ? h('div', { class: 'banner warn no-print' }, `${f.promoter.name} still has ${num(f.outstanding)} unit(s) out on this campaign. They can be cleared for payment once everything is returned or reported as used.`)
+        : f.clearance && f.clearance.cleared_at
+          ? h('div', { class: 'banner ok no-print' }, `Cleared for payment by ${f.clearance.cleared_by_name} on ${fmtDate(f.clearance.cleared_at)}.`)
+          : null,
+      h('div', { class: 'card print-area' }, form),
+    );
+  };
+
+  // ------------------------------------------------------------------ messages
+
+  routes.messages = async (threadId) => {
+    const thread = threadId ? decodeURIComponent(threadId) : null;
+    const inbox = await get('/messages/inbox');
+    const current = thread ? inbox.find((t) => t.thread === thread) || (await get(`/messages/thread${qs({ thread })}`)) : null;
+    const item = (t) =>
+      h('a', { class: `inbox-item${t.thread === thread ? ' active' : ''}${t.unread && t.thread !== thread ? ' unread' : ''}`, href: `#/messages/${encodeURIComponent(t.thread)}` },
+        h('div', { class: 'inbox-top' }, h('strong', null, t.thread === 'notice' ? '📌 Notice board' : t.title), t.unread && t.thread !== thread ? h('span', { class: 'count' }, t.unread) : null),
+        t.subtitle ? h('div', { class: 'small muted' }, t.subtitle) : null,
+        t.last ? h('div', { class: 'small inbox-last' }, `${t.last.user_id === state.user.id ? 'You' : firstName(t.last.user_name)}: ${t.last.body}`) : null,
+        t.last ? h('div', { class: 'small muted' }, fmtDateTime(t.last.created_at)) : null);
+    const threadCard = current
+      ? h('div', { class: 'card thread-card' },
+          h('div', { class: 'thread-top' },
+            h('a', { class: 'btn secondary small thread-back', href: '#/messages' }, '←'),
+            h('div', { style: 'flex:1;min-width:0' }, h('h2', { style: 'margin:0' }, thread === 'notice' ? '📌 Notice board' : current.title), current.subtitle ? h('div', { class: 'small muted' }, current.subtitle) : null),
+            current.link ? h('a', { class: 'btn secondary small', href: `#/${current.link}` }, 'Open') : null,
+            current.phone ? waLink(current.phone) : null),
+          chatPanel(thread, { title: '' }))
+      : h('div', { class: 'card thread-card thread-empty muted' }, 'Choose a conversation, or start a new one.');
+    return page(
+      'Messages',
+      [h('button', { onclick: () => newMessage() }, '+ New message')],
+      h('div', { class: `messages-layout${thread ? ' has-thread' : ''}` },
+        h('div', { class: 'card inbox-card' }, inbox.length ? h('div', { class: 'inbox' }, inbox.map(item)) : h('div', { class: 'muted' }, 'No conversations yet.')),
+        threadCard),
+      h('p', { class: 'hint' }, 'Every request, setup, return and campaign also has its own chat at the bottom of its page. Use the WhatsApp buttons next to phone numbers for anything urgent.'),
+    );
+  };
+
+  async function newMessage() {
+    const [people, camps] = await busy(null, () => Promise.all([get('/messages/people'), get('/campaigns')])) || [];
+    if (!people) return;
+    const options = [
+      ...(['director', 'office', 'account_manager', 'warehouse_manager'].includes(role()) ? [{ value: 'notice', label: '📌 Notice board (everyone)' }] : []),
+      ...camps.filter((c) => ['planned', 'active'].includes(c.status)).map((c) => ({ value: `campaign:${c.id}`, label: `👥 ${c.name} team` })),
+      ...people.map((p) => ({ value: `to:${p.id}`, label: `${p.name} · ${p.role_label}${p.warehouse_name ? ` (${p.warehouse_name})` : ''}` })),
+    ];
+    const to = select(options, {}, 'Choose who it’s for…');
+    const body = h('textarea', { rows: 4, maxlength: '2000', placeholder: 'Your message' });
+    const send = h('button', null, 'Send');
+    const m = modal('New message', h('div', { class: 'form-grid' }, field('To', to), h('div', { class: 'field full' }, h('label', null, 'Message'), body)), [send]);
+    send.onclick = () =>
+      busy(send, async () => {
+        if (!to.value) throw new Error('Choose who the message is for');
+        const res = await post('/messages', to.value.startsWith('to:') ? { to: Number(to.value.slice(3)), body: body.value } : { thread: to.value, body: body.value });
+        m.close();
+        go(`messages/${encodeURIComponent(res.thread)}`);
+      });
+  }
+
+  /** The latest notice board post, if this person hasn't read it yet. */
+  async function noticeBanner() {
+    try {
+      const notice = (await get('/messages/inbox')).find((t) => t.thread === 'notice' && t.unread);
+      if (!notice) return null;
+      return h('a', { class: 'notice-banner', href: '#/messages/notice' }, h('strong', null, `📌 ${notice.last.user_name}: `), notice.last.body, h('span', { class: 'small' }, ' · Read'));
+    } catch {
+      return null;
+    }
   }
 
   async function campaignForm(c) {
@@ -3215,6 +3503,7 @@
       name: input({ value: u ? u.name : '' }),
       email: input({ type: 'email', value: u ? u.email : '' }),
       phone: input({ type: 'tel', value: u ? u.phone || '' : '' }),
+      id_number: input({ value: u ? u.id_number || '' : '', maxlength: '20', autocomplete: 'off', placeholder: 'SA ID or passport number' }),
       // Warehouse managers can only create floor staff and promoters
       role: select(
         Object.entries(ROLE_NAMES)
@@ -3249,6 +3538,7 @@
         field('Full name', f.name),
         field('Email (sign-in)', f.email),
         field('Cell number', f.phone),
+        field('ID / passport number', f.id_number, { hint: 'For the BA form. Only management and the warehouse manager see it.' }),
         field('Role', f.role),
         field('Region', f.region),
         field('Home warehouse', f.warehouse_id, { hint: 'For warehouse staff: filters their dispatch queue' }),
@@ -3509,6 +3799,7 @@
     campSel.addEventListener('change', draw);
     draw();
     const sig = signaturePad('Promoter signs to confirm what they returned');
+    const condition = conditionPicker('Condition the stock came back in');
     const where = locationTag();
     const note = input({ placeholder: 'Note (optional)' });
     const save = h('button', { class: 'ok' }, 'Check in return');
@@ -3521,6 +3812,7 @@
         h('div', { class: 'form-grid' }, field('Campaign', campSel), field('Warehouse', whSel)),
         h('div', { style: 'margin-top:12px' }, rowsWrap),
         h('p', { class: 'hint' }, 'Uniforms that are not clean and ironed go to the laundry and can’t be issued until they’re done.'),
+        condition.el,
         sig.el,
         where.el,
         h('div', { style: 'margin-top:10px' }, note),
@@ -3545,7 +3837,7 @@
           warehouse_id: whSel.value,
           receive_now: true,
           items,
-          handover: { signature: sig.value(), note: note.value, location: (await where.value()) || undefined },
+          handover: { signature: sig.value(), note: note.value, condition: condition.value(), location: (await where.value()) || undefined },
         });
         m.close();
         toast(`${res.ref} checked in`, 'ok');
@@ -4336,7 +4628,7 @@
             { class: 'dl' },
             h('dt', null, 'Set up'), h('dd', null, h('strong', null, fmtLocal(s.setup_at))),
             h('dt', null, 'Strike down'), h('dd', null, h('strong', null, fmtLocal(s.strike_at))),
-            h('dt', null, 'Crew lead'), h('dd', null, s.lead_name, s.lead_phone ? ` · ${s.lead_phone}` : ''),
+            h('dt', null, 'Crew lead'), h('dd', null, s.lead_name, s.lead_phone ? ` · ${s.lead_phone} ` : '', s.lead_id !== state.user.id ? waLink(s.lead_phone, `Hi ${firstName(s.lead_name)}, about ${s.ref} at ${s.venue}: `) : null),
             s.crew.length ? [h('dt', null, 'Crew'), h('dd', null, s.crew.map((c) => c.name).join(', '))] : null,
             s.notes ? [h('dt', null, 'Notes'), h('dd', null, s.notes)] : null,
           ),
@@ -4344,6 +4636,7 @@
       ),
       h('div', { class: 'card' }, h('h2', null, 'Progress'), timeline, s.scan_check ? h('div', { class: 'small', style: 'margin-top:8px' }, scanCheckNote(s.scan_check)) : null, scanOut ? h('div', { class: 'no-print', style: 'margin-top:14px' }, scanOut.el) : null, where ? where.el : null, actions),
       h('div', { class: 'card' }, h('h2', null, 'Equipment'), items, returning ? h('p', { class: 'hint' }, 'Anything not counted back stays against the crew lead and shows on Reminders.') : null),
+      h('div', { class: 'card no-print' }, chatPanel(`setup:${s.id}`, { title: 'Messages about this setup', hint: 'The crew, account manager, warehouse and office all see these.' })),
       h('div', { class: 'card no-print' }, attachmentsPanel({ kind: 'setup', setup_id: s.id }, s.attachments, {
         canUpload: isOps() || s.can_mark || s.lead_id === state.user.id,
         title: 'Setup photos',

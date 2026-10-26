@@ -342,6 +342,29 @@ function buildReminders(db, user) {
     }
   }
 
+  // ---- BA forms ready to clear for payment ------------------------------------
+  if (isStockApprover(user)) {
+    for (const row of db
+      .prepare(
+        `SELECT c.id AS campaign_id, c.name AS campaign_name, u.id AS promoter_id, u.name AS promoter_name
+         FROM campaigns c JOIN users u ON u.id IN (SELECT promoter_id FROM movements WHERE type = 'dispatch' AND campaign_id = c.id)
+         LEFT JOIN ba_clearances bc ON bc.campaign_id = c.id AND bc.promoter_id = u.id
+         WHERE (c.status = 'completed' OR c.end_date < ?) AND bc.cleared_at IS NULL
+           AND COALESCE((SELECT SUM(qty) FROM field_stock f WHERE f.campaign_id = c.id AND f.promoter_id = u.id), 0) = 0
+         ORDER BY c.end_date, u.name`,
+      )
+      .all(today)) {
+      add({
+        group: 'missing',
+        severity: 'medium',
+        type: 'ba_clear',
+        title: `${row.promoter_name} is ready to be cleared for payment`,
+        detail: `${row.campaign_name} has ended and everything is back or reported used. Check the BA form and clear it.`,
+        link: `baform/${row.campaign_id}~${row.promoter_id}`,
+      });
+    }
+  }
+
   // ---- stock counts -------------------------------------------------------
   if (isStockApprover(user)) {
     for (const row of db

@@ -530,6 +530,53 @@ function seed(db) {
       lines: [[p.mobileCap, null], [p.skinTester, null], [p.sauceSachet, null], [polo['f-Black-M'], null], [polo['m-Black-L'], null], [polo['f-White-S'], null]] });
     count({ warehouseId: wh.dbn, counter: u.whDbn, kind: 'spot', daysAgo: 0, status: 'open',
       lines: [[p.sauceTable, null], [p.sauceApron, null], [p.table, null]] });
+
+    // Promoter ID numbers for the BA form. Made up, with a wrong check digit so none is a real person's ID.
+    const fakeId = (birth, serial) => {
+      const body = `${birth}${serial}08`;
+      let sum = 0;
+      [...body].reverse().forEach((d, i) => {
+        let n = Number(d) * (i % 2 === 0 ? 2 : 1);
+        if (n > 9) n -= 9;
+        sum += n;
+      });
+      return `${body}${((10 - (sum % 10)) % 10 + 1) % 10}`;
+    };
+    [[u.p1, '980412', '0457'], [u.p2, '010923', '5124'], [u.p3, '990301', '0812'], [u.p4, '970716', '5301'], [u.p5, '000228', '5649']].forEach(([id, birth, serial]) =>
+      db.prepare('UPDATE users SET id_number = ? WHERE id = ?').run(fakeId(birth, serial), id));
+
+    // Stock went out and came back in good condition; office signed off the finished Braai Master campaign
+    db.prepare("UPDATE handovers SET stock_condition = 'good' WHERE kind IN ('collection', 'dispatch', 'return')").run();
+    const signOff = (campaignId, promoterId, checkedDaysAgo, clearedDaysAgo) =>
+      db.prepare(
+        `INSERT INTO ba_clearances (campaign_id, promoter_id, checked_by, checked_at, check_comment, cleared_by, cleared_at, clear_comment)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(campaignId, promoterId, u.whManager, stamp(checkedDaysAgo, 15), 'Checked against the slip',
+        clearedDaysAgo === null ? null : u.whManager, clearedDaysAgo === null ? null : stamp(clearedDaysAgo, 12),
+        clearedDaysAgo === null ? null : 'Everything back or reported used');
+    const owes = (campaignId, promoterId) => db.prepare('SELECT COALESCE(SUM(qty), 0) AS n FROM field_stock WHERE campaign_id = ? AND promoter_id = ?').get(campaignId, promoterId).n;
+    for (const pr of [u.p3, u.p5]) signOff(c.sauce, pr, 21, owes(c.sauce, pr) ? null : 1);
+    signOff(c.juice, u.p1, 18, null);
+
+    // Conversations: notice board, job chats, the campaign team and a direct message
+    const say = (thread, userId, daysAgo, hour, body) => {
+      const id = ins('INSERT INTO messages (thread, user_id, body, created_at) VALUES (?, ?, ?, ?)', thread, userId, body, stamp(daysAgo, hour));
+      db.prepare(
+        `INSERT INTO message_reads (user_id, thread, last_read_id) VALUES (?, ?, ?)
+         ON CONFLICT (user_id, thread) DO UPDATE SET last_read_id = excluded.last_read_id`,
+      ).run(userId, thread, id);
+    };
+    const canRequest = db.prepare("SELECT r.id FROM requests r JOIN request_items ri ON ri.request_id = r.id WHERE ri.product_id = ? AND r.status = 'approved'").get(p.juiceCan).id;
+    const sandton = db.prepare("SELECT id FROM setups WHERE venue LIKE 'Checkers Hyper Sandton%' AND status = 'scheduled'").get().id;
+    say('notice', u.office, 3, 9, 'Reminder: BA forms must be cleared before payroll runs on the 25th. Bring back everything you were issued, or report it as used, so the warehouse can clear you.');
+    say('notice', u.whManager, 1, 7, 'Counter hours this week are 07:30 to 16:00. Please bring your ID badge (on your phone under My ID badge) when you collect or return stock.');
+    say(`request:${canRequest}`, u.p1, 0, 7, 'Morning! I will collect at about 10:00. Please can the cans be in full boxes, it is easier to carry to the car.');
+    say(`request:${canRequest}`, u.whJhb, 0, 8, 'No problem Nomsa. 2 boxes of 24 and a 6-pack, plus the cups. It will be on the counter.');
+    say(`setup:${sandton}`, u.am1, 1, 14, 'Centre management wants the gazebo to the left of the main entrance, not in front of the doors.');
+    say(`setup:${sandton}`, u.p1, 1, 15, 'Noted, thanks Lerato. We will be there by 07:00.');
+    say(`campaign:${c.juice}`, u.am1, 2, 17, 'Great numbers at Rosebank yesterday, well done team! Sunfresh is very happy. Keep logging every activation with a photo.');
+    say(`campaign:${c.juice}`, u.p2, 2, 18, 'Thanks! We ran low on cups after lunch, can we get an extra sleeve next time?');
+    say(`dm:${Math.min(u.whManager, u.whJhb)}:${Math.max(u.whManager, u.whJhb)}`, u.whJhb, 0, 9, 'Bongani, the labels on two of the gazebo bags are torn. Can you release SET-00003 if I check them by hand?');
   });
 }
 

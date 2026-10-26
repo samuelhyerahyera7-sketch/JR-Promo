@@ -269,11 +269,24 @@
       addLine({ ...line, qty: line.qty || 1 });
       return true;
     };
+    /** A product created while the form is open: offer it on every line and start a line for it. */
+    const addProduct = (p) => {
+      meta.set(String(p.id), p);
+      hints.set(String(p.id), p.hint || '');
+      const opt = { value: p.id, label: p.label };
+      const g = p.group && byGroup.get(p.group);
+      if (g) g.options.push(opt);
+      else grouped.push(opt);
+      wrap.querySelectorAll('.line > div > select').forEach((sel) => sel.append(h('option', { value: p.id }, p.label)));
+      const blank = [...wrap.children].find((r) => !r._sel.value && !r._qty.value);
+      if (blank) blank.remove();
+      addLine({ product_id: p.id })._qty.focus();
+    };
     el.refreshHints = (fn) => {
       for (const p of products) hints.set(String(p.id), fn(p));
       wrap.querySelectorAll('.line > div > select').forEach((s) => s.dispatchEvent(new Event('change')));
     };
-    return { el, values, add };
+    return { el, values, add, addProduct };
   }
 
   // ------------------------------------------------------------------ scanning, signatures, photos, QR
@@ -308,16 +321,21 @@
     let stopped = false;
     let last = '';
     let lastAt = 0;
+    // Camera problems only replace the help text, never a scan result
+    const cameraStatus = (text) => {
+      if (!last) status.textContent = text;
+    };
     const stop = () => {
       stopped = true;
       clearTimeout(timer);
       if (stream) stream.getTracks().forEach((t) => t.stop());
     };
-    const handle = async (raw) => {
+    const handle = async (raw, fromCamera = false) => {
       const code = String(raw || '').trim();
       if (!code) return;
+      // The camera sees the same label many times a second; typed and handheld scans always count
       const now = Date.now();
-      if (code === last && now - lastAt < 2500) return;
+      if (fromCamera && code === last && now - lastAt < 2500) return;
       last = code;
       lastAt = now;
       if (navigator.vibrate) navigator.vibrate(60);
@@ -357,14 +375,14 @@
     (async () => {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         video.hidden = true;
-        status.textContent = 'No camera available here. Type the code or use a handheld scanner.';
+        cameraStatus('No camera available here. Type the code or use a handheld scanner.');
         return;
       }
       try {
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
       } catch {
         video.hidden = true;
-        status.textContent = 'Camera not allowed. Type the code or use a handheld scanner.';
+        cameraStatus('Camera not allowed. Type the code or use a handheld scanner.');
         return;
       }
       if (stopped) return stop();
@@ -398,7 +416,7 @@
         if (stopped) return;
         try {
           const code = await detect();
-          if (code) await handle(code);
+          if (code) await handle(code, true);
         } catch {
           /* keep scanning */
         }
@@ -409,8 +427,144 @@
     return m;
   }
 
-  /** Product SKU from a scanned code: JRP:SKU[:batch], or a raw SKU. */
-  const skuFromCode = (code) => (code.startsWith('JRP:') ? code.split(':')[1] : code).toUpperCase();
+  /** The part of a scanned code the system reads; text after '|' is for people (name, pack, expiry). */
+  const codePart = (code) => String(code).split('|')[0].trim();
+  /** Product SKU from a scanned code: JRP:SKU[:batch], JRK:SKU:qty, or a raw SKU. */
+  const skuFromCode = (code) => {
+    const c = codePart(code);
+    return (/^JR[PK]:/.test(c) ? c.split(':')[1] : c).toUpperCase();
+  };
+
+  /**
+   * What a scanned label is, from a product list that includes packs:
+   * { product, pack, units } or null. Mirrors resolveStockCode on the server.
+   */
+  function resolveScan(code, prods) {
+    const c = codePart(code);
+    const [prefix, sku, size] = c.split(':');
+    const bySku = (x) => prods.find((p) => p.sku.toUpperCase() === String(x || '').toUpperCase());
+    if (prefix === 'JRK') {
+      const product = bySku(sku);
+      const pack = product && (product.packs || []).find((k) => k.qty === Number(size));
+      return pack ? { product, pack, units: pack.qty } : null;
+    }
+    if (prefix === 'JRP') {
+      const product = bySku(sku);
+      return product ? { product, pack: null, units: 1 } : null;
+    }
+    if (c.includes(':')) return null;
+    for (const p of prods) {
+      const pack = (p.packs || []).find((k) => k.barcode === c);
+      if (pack) return { product: p, pack, units: pack.qty };
+    }
+    const product = bySku(c) || prods.find((p) => p.barcode === c);
+    return product ? { product, pack: null, units: 1 } : null;
+  }
+
+  /** QR text for a label: the code, then name, pack and expiry so any phone camera shows what it is. */
+  function labelCode({ sku, name, pack, batch, expiry }) {
+    const code = pack ? `JRK:${sku}:${pack.qty}${batch ? `:${batch}` : ''}` : `JRP:${sku}${batch ? `:${batch}` : ''}`;
+    const text = [String(name || '').replace(/\|/g, '/').slice(0, 60), pack ? `${pack.name} (${pack.qty} units)` : null, expiry ? `EXP ${expiry}` : null];
+    return [code, ...text.filter(Boolean)].join('|');
+  }
+
+  /**
+   * Scan-out check for stock leaving the warehouse. expected() → [{ product_id, sku, name, qty }].
+   * A pack counts as all the units in it. Managers can release without a full scan, with a reason.
+   */
+  function scanOutPanel(prods, expected, { title = 'Scan out' } = {}) {
+    const scans = [];
+    const body = h('div');
+    const reason = input({ placeholder: 'Reason, e.g. labels damaged', maxlength: '300' });
+    const overrideBox = input({ type: 'checkbox' });
+    reason.hidden = true;
+    overrideBox.addEventListener('change', () => (reason.hidden = !overrideBox.checked));
+    const tally = () => {
+      const m = new Map();
+      for (const x of scans) m.set(x.product_id, (m.get(x.product_id) || 0) + x.units);
+      return m;
+    };
+    const breakdown = (productId) => {
+      const counts = new Map();
+      for (const x of scans.filter((y) => y.product_id === productId)) counts.set(x.label, (counts.get(x.label) || 0) + 1);
+      return [...counts].map(([label, n]) => `${n} × ${label}`).join(' · ');
+    };
+    const draw = () => {
+      const got = tally();
+      const want = expected().filter((w) => w.qty > 0);
+      const total = want.reduce((a, w) => a + w.qty, 0);
+      const done = want.reduce((a, w) => a + Math.min(w.qty, got.get(w.product_id) || 0), 0);
+      body.replaceChildren(
+        table(
+          [
+            { label: 'Item', render: (w) => h('div', null, w.name, h('div', { class: 'small muted mono' }, w.sku)) },
+            { label: 'Going out', num: true, render: (w) => num(w.qty) },
+            {
+              label: 'Scanned',
+              render: (w) => {
+                const n = got.get(w.product_id) || 0;
+                return h('div', null, h('strong', null, num(n)), ' ', n === w.qty ? badge('received', '✓') : badge('pending', `${num(w.qty - n)} to go`), h('div', { class: 'small muted' }, breakdown(w.product_id)));
+              },
+            },
+          ],
+          want,
+          { empty: 'Nothing going out' },
+        ),
+        h('div', { class: `scan-total ${total && done === total ? 'ok' : ''}` }, total && done === total ? `✓ All ${num(total)} units scanned` : `${num(done)} of ${num(total)} units scanned`),
+      );
+    };
+    const scanBtn = h('button', { type: 'button', class: 'big' }, '⌗ Scan out');
+    scanBtn.onclick = () =>
+      scanner(
+        (code) => {
+          const hit = resolveScan(code, prods);
+          if (!hit) throw new Error(`✗ ${codePart(code)} is not a known label`);
+          const w = expected().find((x) => x.product_id === hit.product.id && x.qty > 0);
+          if (!w) throw new Error(`✗ ${hit.product.sku} is not going out on this one`);
+          const have = tally().get(w.product_id) || 0;
+          if (have + hit.units > w.qty) {
+            throw new Error(hit.pack
+              ? `✗ A ${hit.pack.name.toLowerCase()} is ${hit.units}, but only ${w.qty - have} more ${w.sku} should go. Open the pack and scan singles.`
+              : `✗ All ${w.qty} × ${w.sku} are already scanned`);
+          }
+          scans.push({ code, product_id: w.product_id, units: hit.units, label: hit.pack ? hit.pack.name : 'single' });
+          draw();
+          return `✓ ${hit.pack ? `${hit.pack.name} (${hit.units}) · ` : ''}${w.sku}: ${have + hit.units} of ${w.qty}`;
+        },
+        { title, keepOpen: true, help: 'Scan every item or pack as it leaves. A pack counts as all the units in it.' },
+      );
+    const undo = h('button', { type: 'button', class: 'secondary', onclick: () => { scans.pop(); draw(); } }, 'Undo last scan');
+    draw();
+    const complete = () => {
+      const got = tally();
+      return expected().every((w) => (got.get(w.product_id) || 0) === w.qty);
+    };
+    return {
+      el: h(
+        'div',
+        { class: 'scan-out' },
+        h('div', { class: 'scan-out-head' }, h('div', null, h('strong', null, title), h('div', { class: 'small muted' }, 'Everything that leaves the warehouse is scanned. Packs count as all the units in them.')), h('div', { class: 'scan-out-btns' }, scanBtn, undo)),
+        body,
+        isApprover() ? h('div', { class: 'scan-override' }, h('label', { class: 'check' }, overrideBox, 'Release without a full scan (warehouse manager)'), reason) : null,
+      ),
+      draw,
+      /** Fields to send with the load-out; throws if the scan isn't complete. */
+      payload() {
+        const override = overrideBox.checked ? reason.value.trim() : '';
+        if (overrideBox.checked && !override) throw new Error('Give a reason for releasing without a full scan');
+        if (!complete() && !override) throw new Error('Scan everything going out first. Check the list for what is still to go.');
+        return { scans: scans.map((x) => x.code), scan_override: override || undefined };
+      },
+    };
+  }
+
+  /** How a load-out was scanned, for the record. */
+  function scanCheckNote(c) {
+    if (!c) return null;
+    return c.matched
+      ? h('span', null, badge('received', '✓ Scanned out'), ` ${num(c.scanned_units)} units by ${c.user_name}, ${fmtDateTime(c.created_at)}`)
+      : h('span', null, badge('rejected', 'Not fully scanned'), ` Released by ${c.user_name}: “${c.override_reason}”`, h('div', { class: 'small muted' }, c.differences));
+  }
 
   /** Finger/mouse signature box. value() returns a PNG data URL, or null if nothing was drawn. */
   function signaturePad(label = 'Promoter signature') {
@@ -1323,7 +1477,7 @@
       [
         h('a', { class: 'btn secondary', href: `/api/stock/levels.csv`, onclick: (e) => { e.currentTarget.href = `/api/stock/levels.csv${qs(filters)}`; } }, 'Export CSV'),
         canEditProducts() ? h('button', { class: 'secondary', onclick: () => rangeForm(load) }, 'New uniform range') : null,
-        canEditProducts() ? h('button', { onclick: () => productForm(null, load) }, 'New product') : null,
+        canEditProducts() ? h('button', { onclick: () => productForm(null, load) }, '+ Add item') : null,
       ],
       h('div', { class: 'card' }, h('div', { class: 'filters' }, search, clientSel, catSel, campSel, h('label', { class: 'check' }, lowBox, 'Low stock only'), h('label', { class: 'check' }, expBox, 'Expiring / expired')), out),
     );
@@ -1355,7 +1509,7 @@
           p.tracks_expiry ? [h('dt', null, 'Expiry'), h('dd', null, p.expired ? badge('rejected', `${num(p.expired)} expired`) : null, ' ', p.next_expiry ? `next batch expires ${fmtDate(p.next_expiry)}` : '')] : null,
           p.in_laundry ? [h('dt', null, 'At laundry'), h('dd', null, num(p.in_laundry))] : null,
         ),
-        h('div', { class: 'qr-box' }, qrImg(`JRP:${p.sku}`, 110), h('div', { class: 'small muted' }, 'Product QR')),
+        qrCodes(p),
       ),
       variants ? [h('h3', { style: 'margin-top:18px' }, 'Sizes & colours in this range'), variants] : null,
       h('h3', { style: 'margin-top:18px' }, 'Warehouse levels'),
@@ -1416,7 +1570,32 @@
     ));
   }
 
-  async function productForm(p, done) {
+  /** An item's QR codes: one for a single unit and one per pack. */
+  function qrCodes(p) {
+    const one = (code, caption) => h('div', { class: 'qr-box' }, qrImg(code, 110), h('div', { class: 'small muted' }, caption));
+    return h(
+      'div',
+      { class: 'qr-codes' },
+      one(labelCode({ sku: p.sku, name: p.name }), 'Single unit'),
+      (p.packs || []).map((k) => one(labelCode({ sku: p.sku, name: p.name, pack: k }), `${k.name} · ${num(k.qty)} units`)),
+    );
+  }
+
+  /** After adding an item: show its QR codes and offer to print labels. */
+  function itemAdded(p) {
+    const m = modal(
+      `${p.sku} added`,
+      h('div', null,
+        h('p', { class: 'muted', style: 'margin-top:0' }, p.packs && p.packs.length ? 'It has its own QR code, and so does each pack. Stick them on the shelf and the boxes.' : 'It has its own QR code. Stick it on the shelf and the items.'),
+        qrCodes(p)),
+      [
+        h('button', { class: 'secondary', onclick: () => m.close() }, 'Done'),
+        h('button', { onclick: () => { m.close(); go(`labels/${p.id}`); } }, 'Print labels'),
+      ],
+    );
+  }
+
+  async function productForm(p, done, { showCodes = true } = {}) {
     const [cls, cats, allCamps] = await Promise.all([clients(), get('/products/categories'), get('/campaigns')]);
     const mine = role() === 'account_manager' ? cls.filter((c) => c.account_manager_id === state.user.id) : cls;
     const f = {
@@ -1444,13 +1623,34 @@
     };
     f.client_id.addEventListener('change', fillCampaigns);
     fillCampaigns();
+    // Packs: a 6-pack or box of 24 gets its own QR code and counts as that many units when scanned
+    const packRows = h('div', { class: 'pack-rows' });
+    const addPack = (pk = {}) => {
+      const name = input({ value: pk.name || '', placeholder: 'e.g. 6-pack, Box of 24', maxlength: '40' });
+      const qty = input({ type: 'number', min: '2', step: '1', value: pk.qty || '', placeholder: 'Units', inputmode: 'numeric' });
+      const barcode = input({ value: pk.barcode || '', placeholder: 'Box barcode (optional)', inputmode: 'numeric', maxlength: '60' });
+      const row = h('div', { class: 'pack-row' }, name, qty, barcode, h('button', { type: 'button', class: 'secondary', title: 'Remove pack', onclick: () => row.remove() }, '×'));
+      row._get = () => ({ name: name.value, qty: qty.value, barcode: barcode.value });
+      packRows.append(row);
+    };
+    ((p && p.packs) || []).forEach(addPack);
+    const packs = h(
+      'div',
+      { class: 'field full' },
+      h('label', null, 'Packs'),
+      h('div', { class: 'hint', style: 'margin-bottom:6px' }, 'Does it come in packs or boxes, like drinks in 6-packs or boxes of 24? Each pack gets its own QR code, and scanning it counts all the units in it.'),
+      packRows,
+      h('div', { class: 'pack-quick' },
+        [[6, '6-pack'], [12, '12-pack'], [24, 'Box of 24']].map(([qty, name]) => h('button', { type: 'button', class: 'secondary small', onclick: () => addPack({ qty, name }) }, `+ ${name}`)),
+        h('button', { type: 'button', class: 'secondary small', onclick: () => addPack() }, '+ Other pack')),
+    );
     const uniformFields = h('div', { class: 'form-grid field full uniform-fields' }, field('Cut', f.gender), field('Size', f.size), field('Colour', f.colour), field('Style / range', f.style));
     const syncCategory = () => (uniformFields.hidden = f.category.value !== 'Uniform');
     f.category.addEventListener('change', syncCategory);
     syncCategory();
-    const save = h('button', null, p ? 'Save changes' : 'Create product');
+    const save = h('button', null, p ? 'Save changes' : 'Add item');
     const m = modal(
-      p ? `Edit ${p.sku}` : 'New product',
+      p ? `Edit ${p.sku}` : 'Add item',
       h(
         'div',
         { class: 'form-grid' },
@@ -1462,8 +1662,9 @@
         field('Unit of measure', f.unit),
         field('Shelf campaign (colour)', f.campaign_id, { hint: 'Shelve it under this campaign’s colour so it’s easy to find' }),
         field('Reorder level', f.reorder_level, { hint: 'Alert when total on hand drops to this' }),
-        field('Barcode', f.barcode),
+        field('Barcode', f.barcode, { hint: 'The supplier’s barcode on a single unit, if it has one' }),
         h('label', { class: 'check field full' }, f.tracks_expiry, 'Has an expiry date (track batches)'),
+        packs,
         h('label', { class: 'check field full' }, f.active, 'Active'),
       ),
       [save],
@@ -1471,12 +1672,13 @@
     save.onclick = () =>
       busy(save, async () => {
         const body = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.type === 'checkbox' ? el.checked : el.value]));
-        if (p) await put(`/products/${p.id}`, body);
-        else await post('/products', body);
+        body.packs = [...packRows.children].map((r) => r._get()).filter((x) => x.qty || x.name || x.barcode);
+        const saved = p ? await put(`/products/${p.id}`, body) : await post('/products', body);
         invalidate('products');
         m.close();
-        toast(p ? 'Product updated' : 'Product created', 'ok');
-        if (done) done();
+        toast(p ? 'Item updated' : 'Item added', 'ok');
+        if (!p && showCodes) itemAdded(saved);
+        if (done) done(saved);
       });
   }
 
@@ -1506,11 +1708,10 @@
       photoList.textContent = photos.map((f) => f.name).join(', ');
     }, { label: 'Photo of waybill' });
     const scanBtn = h('button', { type: 'button', class: 'secondary small', onclick: () => scanner((code) => {
-      const sku = skuFromCode(code);
-      const p = prods.find((x) => x.sku.toUpperCase() === sku || x.barcode === code);
-      if (!p || !lines.add({ product_id: p.id, qty: 1 })) throw new Error(`✗ ${sku} is not a known product`);
-      return `✓ Added 1 × ${p.sku}`;
-    }, { title: 'Scan items in', keepOpen: true, help: 'Each scan adds one unit. Type a quantity afterwards for full boxes.' }) }, '⌗ Scan items');
+      const hit = resolveScan(code, prods);
+      if (!hit || !lines.add({ product_id: hit.product.id, qty: hit.units })) throw new Error(`✗ ${skuFromCode(code)} is not a known product`);
+      return `✓ Added ${hit.pack ? `${hit.pack.name} (${hit.units})` : '1'} × ${hit.product.sku}`;
+    }, { title: 'Scan items in', keepOpen: true, help: 'Each scan adds one unit; a pack label adds all the units in it. The supplier’s barcode on a box works too, once it is saved on the pack.' }) }, '⌗ Scan items');
     const save = h('button', null, 'Book stock in');
     save.onclick = () =>
       busy(save, async () => {
@@ -1534,7 +1735,15 @@
         { class: 'card' },
         h('p', { class: 'muted small', style: 'margin-top:0' }, 'Book client or supplier deliveries into a warehouse. Dated stock (samples etc.) needs a batch and expiry date.'),
         h('div', { class: 'form-grid' }, field('Warehouse', wh), field('Reference', ref), field('For campaign', campSel, { hint: 'Tags the products with that campaign’s shelf colour' }), field('Note', note), h('div', { class: 'field full' }, campHint)),
-        h('div', { class: 'page-head', style: 'margin:18px 0 8px' }, h('h3', { style: 'margin:0' }, 'Products received'), scanBtn),
+        h('div', { class: 'page-head', style: 'margin:18px 0 8px' }, h('h3', { style: 'margin:0' }, 'Products received'), h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' },
+          canEditProducts()
+            ? h('button', { type: 'button', class: 'secondary small', onclick: () => productForm(null, async (saved) => {
+                const fresh = (await products()).find((x) => x.id === saved.id) || saved;
+                prods.push(fresh);
+                lines.addProduct(productOptions([fresh])[0]);
+              }, { showCodes: false }) }, '+ New item')
+            : null,
+          scanBtn)),
         lines.el,
         h('h3', { style: 'margin-top:18px' }, 'Waybill & delivery photos'),
         h('p', { class: 'hint', style: 'margin-top:-4px' }, 'Snap the signed waybill or delivery note. You can add more later under Deliveries & waybills.'),
@@ -1554,10 +1763,23 @@
     const note = input({ placeholder: 'e.g. Truck, driver, reason' });
     const lines = linesEditor(productOptions(prods, (p) => levelHint(p, from.value)));
     from.addEventListener('change', () => lines.el.refreshHints((p) => levelHint(p, from.value)));
+    // What's on the lines, per product, for the scan-out check
+    const going = () => {
+      const m = new Map();
+      for (const l of lines.values()) if (l.product_id) m.set(l.product_id, (m.get(l.product_id) || 0) + (l.qty || 0));
+      return [...m].map(([pid, qty]) => {
+        const p = prods.find((x) => x.id === pid) || {};
+        return { product_id: pid, sku: p.sku, name: p.name, qty };
+      });
+    };
+    const scanOut = scanOutPanel(prods, going, { title: 'Scan out' });
+    lines.el.addEventListener('input', () => scanOut.draw());
+    lines.el.addEventListener('change', () => scanOut.draw());
+    lines.el.addEventListener('click', () => setTimeout(() => scanOut.draw()));
     const save = h('button', null, 'Transfer stock');
     save.onclick = () =>
       busy(save, async () => {
-        const r = await post('/stock/transfer', { from_warehouse_id: from.value, to_warehouse_id: to.value, reference: ref.value, note: note.value, items: lines.values() });
+        const r = await post('/stock/transfer', { from_warehouse_id: from.value, to_warehouse_id: to.value, reference: ref.value, note: note.value, items: lines.values(), ...scanOut.payload() });
         invalidate('products', 'warehouses');
         toast(`Transfer ${r.reference} booked`, 'ok');
         go('movements');
@@ -1571,6 +1793,7 @@
         h('div', { class: 'form-grid' }, field('From warehouse', from), field('To warehouse', to), field('Reference', ref), field('Note', note)),
         h('h3', { style: 'margin-top:18px' }, 'Products'),
         lines.el,
+        h('div', { style: 'margin-top:18px' }, scanOut.el),
         h('div', { style: 'margin-top:18px' }, save),
       ),
     );
@@ -1786,16 +2009,16 @@
       const scan = h('button', { class: 'secondary', type: 'button' }, '⌗ Scan to count');
       scan.onclick = () =>
         scanner(
-          (code) => {
-            const sku = skuFromCode(code);
-            const line = c.items.find((l) => l.sku.toUpperCase() === sku || l.barcode === code);
-            if (!line) throw new Error(`✗ ${sku} is not on this count`);
+          async (code) => {
+            const hit = resolveScan(code, await products());
+            const line = hit && c.items.find((l) => l.product_id === hit.product.id);
+            if (!line) throw new Error(`✗ ${hit ? hit.product.sku : skuFromCode(code)} is not on this count`);
             const el = inputs.get(line.id);
-            el.value = Number(el.value || 0) + 1;
+            el.value = Number(el.value || 0) + hit.units;
             showProgress();
-            return `✓ ${line.sku}: ${el.value}`;
+            return `✓ ${hit.pack ? `${hit.pack.name} (${hit.units}) · ` : ''}${line.sku}: ${el.value}`;
           },
-          { title: `Count ${c.ref}`, keepOpen: true, help: 'Each scan adds 1. Type the number in for full boxes.' },
+          { title: `Count ${c.ref}`, keepOpen: true, help: 'Each scan adds 1. A sealed pack’s label adds all the units in it.' },
         );
       const saveBtn = h('button', { class: 'secondary' }, 'Save progress');
       saveBtn.onclick = () => busy(saveBtn, async () => { await api('PUT', `/counts/${c.id}/lines`, { lines: values() }); toast('Saved', 'ok'); });
@@ -2096,18 +2319,12 @@
 
     const approveInputs = new Map();
     const dispatchInputs = new Map();
-    const scanned = new Map();
-    const scanCells = new Map();
     const mode = canManage && q.status === 'pending' ? 'approve' : isOps() && ['approved', 'picking'].includes(q.status) ? 'dispatch' : null;
+    const scanOut = mode === 'dispatch'
+      ? scanOutPanel(await products(), () => q.items.map((x) => ({ product_id: x.product_id, sku: x.sku, name: x.product_name, qty: Number((dispatchInputs.get(x.id) || {}).value ?? x.qty_approved) || 0 })), { title: `Scan out ${q.ref}` })
+      : null;
     const uniformsIn = q.items.some((i) => i.category === 'Uniform' && (i.qty_approved || i.qty_requested) > 0);
     const variant = (x) => (x.size ? h('div', { class: 'small' }, [GENDER_NAMES[x.gender], x.colour, x.size].filter(Boolean).join(' · ')) : null);
-    const drawScan = (x) => {
-      const cell = scanCells.get(x.id);
-      if (!cell) return;
-      const n = scanned.get(x.product_id) || 0;
-      const target = Number((dispatchInputs.get(x.id) || {}).value || x.qty_approved);
-      cell.replaceChildren(n >= target && target > 0 ? badge('received', `✓ ${n}`) : n ? badge('pending', `${n} / ${target}`) : h('span', { class: 'muted' }, '—'));
-    };
     const items = table(
       [
         { label: 'Product', render: (x) => h('div', null, x.product_name, h('div', { class: 'small muted mono' }, x.sku), x.batches ? h('div', { class: 'small muted' }, `Batch: ${x.batches}`) : null) },
@@ -2130,19 +2347,17 @@
           render: (x) => {
             if (mode !== 'dispatch') return x.qty_dispatched === null ? '—' : num(x.qty_dispatched);
             const el = input({ type: 'number', min: '0', max: String(x.qty_approved), value: x.qty_approved, style: 'width:100px' });
-            el.addEventListener('input', () => drawScan(x));
+            el.addEventListener('input', () => scanOut.draw());
             dispatchInputs.set(x.id, el);
             return el;
           },
         },
-        mode === 'dispatch'
-          ? { label: 'Scanned', render: (x) => { const c = h('span'); scanCells.set(x.id, c); drawScan(x); return c; } }
-          : null,
+
       ].filter(Boolean),
       q.items,
       { rowClass: (x) => (x.category === 'Uniform' ? 'uniform-row' : '') },
     );
-    q.items.forEach(drawScan);
+    if (scanOut) scanOut.draw();
 
     const actions = h('div', { class: 'no-print', style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;align-items:end' });
     const extra = h('div', { class: 'no-print' });
@@ -2166,26 +2381,12 @@
       append(actions, h('div', { style: 'flex:1;min-width:220px' }, note), approve, reject);
     }
     if (mode === 'dispatch') {
-      // Scan each item as it is picked; mismatches are flagged straight away
-      const scanBtn = h('button', { class: 'secondary', type: 'button' }, '⌗ Scan items as you pick');
-      scanBtn.onclick = () =>
-        scanner(
-          (code) => {
-            const sku = skuFromCode(code);
-            const item = q.items.find((i) => i.sku.toUpperCase() === sku || i.barcode === code);
-            if (!item) throw new Error(`✗ ${sku} is not on this request`);
-            scanned.set(item.product_id, (scanned.get(item.product_id) || 0) + 1);
-            drawScan(item);
-            return `✓ ${item.sku}: ${scanned.get(item.product_id)} of ${item.qty_approved} scanned`;
-          },
-          { title: `Pick ${q.ref}`, keepOpen: true, help: 'Scan each item’s QR label. Every scan counts one unit.' },
-        );
       if (q.status === 'approved') {
         const pick = h('button', { class: 'secondary' }, 'Start picking');
         pick.onclick = () => busy(pick, async () => { await post(`/requests/${q.id}/pick`); reload(); });
         append(actions, pick);
       }
-      append(actions, scanBtn, h('button', { class: 'secondary', onclick: () => window.print() }, 'Print picking slip'));
+      append(actions, h('button', { class: 'secondary', onclick: () => window.print() }, 'Print picking slip'));
 
       const clean = input({ type: 'checkbox' });
       const ironed = input({ type: 'checkbox' });
@@ -2196,9 +2397,11 @@
       const dispatchBtn = h('button', { class: 'ok big' }, collect ? `Issue to ${q.promoter_name}` : 'Dispatch');
       dispatchBtn.onclick = () =>
         busy(dispatchBtn, async () => {
+          const scanned = scanOut.payload();
           const signature = sig ? sig.value() : null;
           if (collect && !signature) throw new Error(`${q.promoter_name} needs to sign before the stock is handed over`);
           await post(`/requests/${q.id}/dispatch`, {
+            ...scanned,
             courier: courier.value,
             waybill: waybill.value,
             items: [...dispatchInputs].map(([itemId, el]) => ({ id: itemId, qty_dispatched: el.value })),
@@ -2214,6 +2417,7 @@
           { class: 'card handover-form' },
           h('h2', null, collect ? 'Hand over at the counter' : 'Send out'),
           h('div', { class: 'processing' }, `Processed by ${state.user.name} (${ROLE_NAMES[role()]}) → Promoter: ${q.promoter_name}${q.promoter_size ? ` · uniform ${GENDER_NAMES[q.promoter_gender] || ''} ${q.promoter_size}` : ''}`),
+          scanOut.el,
           uniformsIn
             ? h('div', { class: 'uniform-check' }, h('strong', null, 'Uniform check'), h('label', { class: 'check' }, clean, 'Uniforms are clean'), h('label', { class: 'check' }, ironed, 'Uniforms are ironed'))
             : null,
@@ -2271,6 +2475,7 @@
             h('dt', null, 'Requested'), h('dd', null, `${q.requested_by_name}, ${fmtDateTime(q.created_at)}`),
             q.approved_by_name ? [h('dt', null, q.status === 'rejected' ? 'Rejected' : 'Approved'), h('dd', null, `${q.approved_by_name}, ${fmtDateTime(q.approved_at)}`)] : null,
             q.dispatched_by_name ? [h('dt', null, collect ? 'Issued by' : 'Dispatched'), h('dd', null, `${q.dispatched_by_name}, ${fmtDateTime(q.dispatched_at)}`)] : null,
+            q.scan_check ? [h('dt', null, 'Scan out'), h('dd', null, scanCheckNote(q.scan_check))] : null,
             q.waybill ? [h('dt', null, 'Waybill'), h('dd', { class: 'mono' }, `${q.courier ? `${q.courier} · ` : ''}${q.waybill}`)] : null,
             q.delivered_at ? [h('dt', null, collect ? 'Collected' : 'Delivered'), h('dd', null, fmtDateTime(q.delivered_at))] : null,
             q.notes ? [h('dt', null, 'Notes'), h('dd', null, q.notes)] : null,
@@ -3641,15 +3846,29 @@
 
   // ------------------------------------------------------------------ QR labels & badges
 
-  routes.labels = async () => {
+  routes.labels = async (focusId) => {
     const [prods, batches, camps] = await Promise.all([get('/products'), get('/stock/expiry?days=3650'), get('/campaigns')]);
     const running = camps.filter((c) => ['planned', 'active'].includes(c.status) && c.colour);
-    const shelfOf = new Map(prods.map((p) => [p.id, p]));
+    const byId = new Map(prods.map((p) => [p.id, p]));
     const search = input({ type: 'search', placeholder: 'Filter products…' });
     const campSel = select(running.map((c) => ({ value: c.id, label: `${colourName(c.colour)} · ${c.name}` })), {}, 'All campaigns');
+    // How many labels of each kind: key `${productId}:${packQty}` (0 = single unit), batches `${batchId}:${packQty}`
     const copies = new Map();
-    const batchPick = new Map();
+    const batchCopies = new Map();
     const signPick = new Set();
+    const kindsOf = (p) => [{ qty: 0, name: 'Single' }, ...((p && p.packs) || [])];
+    const counts = (store, keyBase, p) =>
+      h('div', { class: 'label-counts' }, kindsOf(p).map((k) => {
+        const key = `${keyBase}:${k.qty}`;
+        const el = input({ type: 'number', min: '0', value: store.get(key) || '', placeholder: '0', inputmode: 'numeric' });
+        el.addEventListener('input', () => store.set(key, Number(el.value) || 0));
+        return h('label', { class: 'label-count' }, h('span', null, k.qty ? `${k.name} (${k.qty})` : 'Single'), el);
+      }));
+    const focus = byId.get(Number(focusId));
+    if (focus) {
+      search.value = focus.sku;
+      kindsOf(focus).forEach((k) => copies.set(`${focus.id}:${k.qty}`, 1));
+    }
     const list = h('div');
     const draw = () => {
       const q = search.value.toLowerCase();
@@ -3659,17 +3878,9 @@
       list.replaceChildren(
         table(
           [
-            { label: 'Product', render: (x) => h('div', null, x.name, h('div', { class: 'small muted' }, `${x.sku} · ${x.client_name}`), shelfTag(x)) },
+            { label: 'Product', render: (x) => h('div', null, x.name, h('div', { class: 'small muted' }, `${x.sku} · ${x.client_name}`), shelfTag(x), x.tracks_expiry ? h('div', { class: 'small muted' }, 'Dated stock: batch labels below show the expiry date') : null) },
             { label: 'Category', key: 'category' },
-            {
-              label: 'Labels',
-              num: true,
-              render: (x) => {
-                const el = input({ type: 'number', min: '0', value: copies.get(x.id) || '', placeholder: '0', style: 'width:80px' });
-                el.addEventListener('input', () => copies.set(x.id, Number(el.value) || 0));
-                return el;
-              },
-            },
+            { label: 'Labels', render: (x) => counts(copies, x.id, x) },
           ],
           rows,
           { empty: 'No products match' },
@@ -3682,9 +3893,9 @@
     const batchList = batches.length
       ? table(
           [
-            { label: 'Batch', render: (x) => h('div', null, `${x.sku} · ${x.batch_no}`, h('div', { class: 'small muted' }, `${x.warehouse_name} · exp ${fmtDate(x.expiry_date)}`)) },
+            { label: 'Batch', render: (x) => h('div', null, x.product_name, h('div', { class: 'small muted' }, `${x.sku} · ${x.batch_no} · ${x.warehouse_name}`), h('div', { class: 'small' }, h('strong', null, `EXP ${fmtDate(x.expiry_date)}`))) },
             { label: 'Qty', num: true, render: (x) => num(x.qty) },
-            { label: 'Labels', num: true, render: (x) => { const el = input({ type: 'number', min: '0', placeholder: '0', style: 'width:80px' }); el.addEventListener('input', () => batchPick.set(x.id, { ...x, n: Number(el.value) || 0 })); return el; } },
+            { label: 'Labels', render: (x) => counts(batchCopies, x.id, byId.get(x.product_id)) },
           ],
           batches,
         )
@@ -3699,15 +3910,24 @@
     const sheet = h('div', { class: 'print-area' });
     const build = () => {
       const labels = [];
-      const shelf = (productId) => shelfOf.get(productId) || {};
+      const push = (n, l) => {
+        for (let i = 0; i < n; i++) labels.push(l);
+      };
       for (const p of prods) {
-        for (let i = 0; i < (copies.get(p.id) || 0); i++) {
-          labels.push({ code: `JRP:${p.sku}`, sku: p.sku, name: p.name, extra: p.client_name, colour: p.shelf_colour, campaign: p.shelf_campaign });
+        for (const k of kindsOf(p)) {
+          const pack = k.qty ? k : null;
+          push(copies.get(`${p.id}:${k.qty}`) || 0, { code: labelCode({ sku: p.sku, name: p.name, pack }), sku: p.sku, name: p.name, pack, colour: p.shelf_colour, campaign: p.shelf_campaign });
         }
       }
-      for (const b of batchPick.values()) {
-        const p = shelf(b.product_id);
-        for (let i = 0; i < b.n; i++) labels.push({ code: `JRP:${b.sku}:${b.batch_no}`, sku: b.sku, name: b.product_name, extra: `Batch ${b.batch_no} · EXP ${b.expiry_date}`, colour: p.shelf_colour, campaign: p.shelf_campaign });
+      for (const b of batches) {
+        const p = byId.get(b.product_id) || {};
+        for (const k of kindsOf(p)) {
+          const pack = k.qty ? k : null;
+          push(batchCopies.get(`${b.id}:${k.qty}`) || 0, {
+            code: labelCode({ sku: b.sku, name: b.product_name, pack, batch: b.batch_no, expiry: b.expiry_date }),
+            sku: b.sku, name: b.product_name, pack, batch: b.batch_no, expiry: b.expiry_date, colour: p.shelf_colour, campaign: p.shelf_campaign,
+          });
+        }
       }
       const signs = running.filter((c) => signPick.has(c.id));
       if (!labels.length && !signs.length) return toast('Choose labels or shelf signs to print', 'error');
@@ -3718,8 +3938,13 @@
         labels.length
           ? h('div', { class: 'label-sheet' }, labels.map((l) =>
               h('div', { class: `qr-label${l.colour ? ' banded' : ''}`, style: l.colour ? `--c:${colourHex(l.colour)}` : null },
-                qrImg(l.code, 96),
-                h('div', null, h('div', { class: 'mono' }, l.sku), h('div', { class: 'label-name' }, l.name), h('div', { class: 'small' }, l.extra), l.colour ? h('div', { class: 'label-band' }, `${colourName(l.colour)} · ${l.campaign || ''}`) : null),
+                qrImg(l.code, 100),
+                h('div', { class: 'label-text' },
+                  h('div', { class: 'label-name' }, l.name),
+                  l.pack ? h('div', { class: 'label-pack' }, `${l.pack.name} · ${num(l.pack.qty)} units`) : null,
+                  l.expiry ? h('div', { class: 'label-exp' }, `EXP ${fmtDate(l.expiry)}`) : null,
+                  h('div', { class: 'mono small' }, l.batch ? `${l.sku} · ${l.batch}` : l.sku),
+                  l.colour ? h('div', { class: 'label-band' }, `${colourName(l.colour)} · ${l.campaign || ''}`) : null),
               )))
           : null,
         signs.map((c) =>
@@ -3731,16 +3956,16 @@
     };
     return page(
       'QR labels & shelf signs',
-      [h('button', { onclick: build }, 'Print')],
+      [canEditProducts() ? h('button', { class: 'secondary', onclick: () => productForm(null, () => render(), { showCodes: false }) }, '+ Add item') : null, h('button', { onclick: build }, 'Print')],
       h('div', { class: 'no-print' },
         h('div', { class: 'card' },
           h('h2', null, 'Product labels'),
-          h('p', { class: 'muted small', style: 'margin-top:0' }, 'QR labels for shelves, boxes and items. Labels for products tagged to a campaign get that campaign’s colour band. Scanning a label opens the product, adds it when receiving, and ticks it off when picking. Prints 3 across on A4 (fits 63×38 mm label sheets).'),
+          h('p', { class: 'muted small', style: 'margin-top:0' }, 'Every item has its own QR code, and so does each pack (6-pack, box of 24…). Scanning a pack counts all the units in it. The QR code also holds the product name (and expiry date on batch labels), so any phone camera shows what it is. Labels for products tagged to a campaign get that campaign’s colour band. Prints 3 across on A4 (fits 63×38 mm label sheets).'),
           h('div', { class: 'filters' }, search, campSel),
           list,
         ),
+        h('div', { class: 'card' }, h('h2', null, 'Batch labels with expiry date'), h('p', { class: 'muted small', style: 'margin-top:0' }, 'For dated stock: the label and its QR code show the product, batch and expiry date.'), batchList),
         h('div', { class: 'card' }, h('h2', null, 'Shelf signs'), h('p', { class: 'muted small', style: 'margin-top:0' }, 'A full-width coloured sign for the end of each campaign’s shelf. Scanning its QR opens the campaign.'), signList),
-        h('div', { class: 'card' }, h('h2', null, 'Batch labels (dated stock)'), batchList),
       ),
       sheet,
     );
@@ -4048,9 +4273,12 @@
 
     const actions = h('div', { class: 'no-print', style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;align-items:center' });
     const where = s.can_mark ? locationTag() : null;
+    const scanOut = s.can_load
+      ? scanOutPanel(await products(), () => s.items.map((x) => ({ product_id: x.product_id, sku: x.sku, name: x.product_name, qty: x.qty })), { title: `Scan out ${s.ref}` })
+      : null;
     if (s.can_load) {
       const btn = h('button', { class: 'ok' }, 'Load out (equipment leaves the warehouse)');
-      btn.onclick = () => busy(btn, async () => { await post(`/setups/${s.id}/load`); toast(`${s.ref} loaded out to ${s.lead_name}`, 'ok'); reload(); });
+      btn.onclick = () => busy(btn, async () => { await post(`/setups/${s.id}/load`, scanOut.payload()); toast(`${s.ref} loaded out to ${s.lead_name}`, 'ok'); reload(); });
       append(actions, btn, h('button', { class: 'secondary', onclick: () => window.print() }, 'Print load sheet'));
     }
     if (s.can_mark && s.status === 'loaded') {
@@ -4114,7 +4342,7 @@
           ),
         ),
       ),
-      h('div', { class: 'card' }, h('h2', null, 'Progress'), timeline, where ? where.el : null, actions),
+      h('div', { class: 'card' }, h('h2', null, 'Progress'), timeline, s.scan_check ? h('div', { class: 'small', style: 'margin-top:8px' }, scanCheckNote(s.scan_check)) : null, scanOut ? h('div', { class: 'no-print', style: 'margin-top:14px' }, scanOut.el) : null, where ? where.el : null, actions),
       h('div', { class: 'card' }, h('h2', null, 'Equipment'), items, returning ? h('p', { class: 'hint' }, 'Anything not counted back stays against the crew lead and shows on Reminders.') : null),
       h('div', { class: 'card no-print' }, attachmentsPanel({ kind: 'setup', setup_id: s.id }, s.attachments, {
         canUpload: isOps() || s.can_mark || s.lead_id === state.user.id,

@@ -136,12 +136,23 @@ function seed(db) {
       gazeboSmall: product('JR-SET-GAZ2', 'JR gazebo 2x2m (black)', cl.house, 'Gazebo', 2900, 2),
       flag: product('JR-SET-FLAG', 'Telescopic banner flag with base', cl.house, 'Setup & Display', 650, 6),
       cooler: product('JR-EQP-COOL', 'Cooler box 40L', cl.house, 'Equipment', 720, 4),
+      juiceCan: product('SFJ-DRK-330', 'Sunfresh Mango 330ml can', cl.juice, 'Sample', 9.5, 240, 'can'),
     };
     db.prepare("UPDATE products SET gender = 'unisex', size = 'M', colour = 'Orange', style = 'Sunfresh promoter T-shirt' WHERE id = ?").run(p.juiceTee);
     // Samples with a shelf life are tracked by batch and expiry date
-    for (const id of [p.juiceSample, p.coffeeSachet, p.skinTester, p.sauceSachet]) {
+    for (const id of [p.juiceSample, p.coffeeSachet, p.skinTester, p.sauceSachet, p.juiceCan]) {
       db.prepare('UPDATE products SET tracks_expiry = 1 WHERE id = ?').run(id);
     }
+    // Drinks arrive in 6-packs and boxes of 24; each pack has its own QR code
+    const pack = (productId, name, qty) =>
+      db.prepare('INSERT INTO product_packs (product_id, name, qty, barcode) VALUES (?, ?, ?, ?)').run(
+        productId, name, qty, `601${String(Math.floor(Math.random() * 1e10)).padStart(10, '0')}`,
+      );
+    pack(p.juiceCan, '6-pack', 6);
+    pack(p.juiceCan, 'Box of 24', 24);
+    pack(p.juiceSample, 'Box of 24', 24);
+    pack(p.coffeeSachet, 'Box of 50', 50);
+    pack(p.sauceSachet, 'Box of 100', 100);
 
     // JR promoter golf shirt range: ladies & mens, black & white, XS-XXL
     const polo = {};
@@ -192,6 +203,7 @@ function seed(db) {
     receive(29, wh.dbn, 'GRN-24096', [[p.gazeboSmall, 2], [p.mobileBackwall, 2], [p.mobilePullup, 4]], u.whDbn, 'Printed by Signage Express');
     receive(29, wh.cpt, 'GRN-24097', [[p.skinPullup, 3], [p.mobilePullup, 2]], u.whCpt);
     receive(28, wh.jhb, 'GRN-24101', [[p.juiceSample, 6000, 20], [p.juiceCup, 200], [p.juiceAframe, 12], [p.juiceTee, 60]], u.whJhb, 'Courier: Ram Hand-to-Hand');
+    receive(6, wh.jhb, 'GRN-24131', [[p.juiceCan, 960, 120]], u.whJhb, '40 boxes of 24 · Sunfresh Midrand plant');
     receive(27, wh.jhb, 'GRN-24102', [[p.coffeeSachet, 10000, 200], [p.coffeeMug, 400], [p.coffeeUrn, 6], [p.coffeeWobbler, 1200]], u.whJhb);
     receive(26, wh.cpt, 'GRN-24103', [[p.mobileSim, 8000], [p.mobileGazebo, 6], [p.mobileCap, 600], [p.mobileFlyer, 20000]], u.whCpt);
     receive(25, wh.cpt, 'GRN-24104', [[p.skinTester, 3000, 90], [p.skinBag, 500], [p.skinStand, 20]], u.whCpt);
@@ -220,7 +232,7 @@ function seed(db) {
     };
     // Shelve each client's stock under its campaign colour (company stock stays untagged)
     const shelve = (campaignId, ids) => ids.forEach((pid) => db.prepare('UPDATE products SET campaign_id = ? WHERE id = ?').run(campaignId, pid));
-    shelve(c.juice, [p.juiceSample, p.juiceCup, p.juiceAframe, p.juiceTee, p.juiceBackwall, p.juicePullup]);
+    shelve(c.juice, [p.juiceCan, p.juiceSample, p.juiceCup, p.juiceAframe, p.juiceTee, p.juiceBackwall, p.juicePullup]);
     shelve(c.coffee, [p.coffeeSachet, p.coffeeMug, p.coffeeUrn, p.coffeeWobbler, p.coffeePullup]);
     shelve(c.mobile, [p.mobileSim, p.mobileGazebo, p.mobileCap, p.mobileFlyer, p.mobileBackwall, p.mobilePullup]);
     shelve(c.skin, [p.skinTester, p.skinBag, p.skinStand, p.skinPullup]);
@@ -309,6 +321,9 @@ function seed(db) {
       lines: [[p.juiceSample, 1500], [p.juiceTee, 2]] });
     request({ campaignId: c.mobile, warehouseId: wh.cpt, promoterId: u.p3, by: u.p3, approver: u.am2, status: 'rejected', daysAgo: 5,
       lines: [[p.mobileCap, 300]] });
+    // Ready to scan out at the counter: 2 boxes of 24 + a 6-pack, and 2 sleeves of cups
+    request({ campaignId: c.juice, warehouseId: wh.jhb, promoterId: u.p1, by: u.p1, approver: u.am1, status: 'approved', daysAgo: 0, neededIn: 1,
+      lines: [[p.juiceCan, 54], [p.juiceCup, 2]] });
 
     // Promoter activation reports
     let useNo = 0;

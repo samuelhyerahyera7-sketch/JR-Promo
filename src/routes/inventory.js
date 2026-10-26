@@ -7,6 +7,7 @@ const stock = require('../stock');
 const { tx } = require('../db');
 const { clientScope } = require('../access');
 const { toCsv } = require('../csv');
+const { checkScansOut } = require('../scanout');
 
 const CATEGORIES = [
   'Sample',
@@ -91,6 +92,56 @@ function assertShelfCampaign(db, campaignId, clientId) {
   if (c.client_id !== clientId && !(house && house.is_house)) throw new HttpError(400, "That campaign is for a different client");
 }
 
+/** SKUs go into QR codes, so they can't contain the code separators. */
+function skuOf(value) {
+  const sku = v.str(value, 'SKU', { required: true, max: 40 }).toUpperCase();
+  if (/[:|\s]/.test(sku)) throw new HttpError(400, 'SKU cannot contain spaces, ":" or "|"');
+  return sku;
+}
+
+/** Active packs (6-pack, box of 24…) per product: Map(productId → [{id, name, qty, barcode}]). */
+function packsByProduct(db, productId) {
+  const rows = db
+    .prepare(`SELECT id, product_id, name, qty, barcode FROM product_packs WHERE active = 1 ${productId ? 'AND product_id = ?' : ''} ORDER BY qty`)
+    .all(...(productId ? [productId] : []));
+  const map = new Map();
+  for (const r of rows) {
+    if (!map.has(r.product_id)) map.set(r.product_id, []);
+    map.get(r.product_id).push(r);
+  }
+  return map;
+}
+
+/**
+ * Replace a product's packs. Packs are matched on size, so a pack's QR code
+ * (JRK:<SKU>:<qty>) keeps working when it is renamed. Removed packs are retired,
+ * not deleted, because past scans refer to them.
+ */
+function savePacks(db, productId, list) {
+  if (list === undefined) return;
+  if (!Array.isArray(list)) throw new HttpError(400, 'Packs must be a list');
+  const packs = list.map((p) => {
+    const qty = v.int(p.qty, 'Units per pack', { required: true, min: 2, max: 10000 });
+    return { qty, name: v.str(p.name, 'Pack name', { max: 40 }) || `Pack of ${qty}`, barcode: v.str(p.barcode, 'Pack barcode', { max: 60 }) };
+  });
+  if (new Set(packs.map((p) => p.qty)).size !== packs.length) throw new HttpError(400, 'Two packs have the same number of units');
+  for (const p of packs) {
+    if (!p.barcode) continue;
+    const clash =
+      db.prepare('SELECT 1 FROM product_packs WHERE barcode = ? AND product_id != ?').get(p.barcode, productId) ||
+      db.prepare('SELECT 1 FROM products WHERE barcode = ?').get(p.barcode);
+    if (clash) throw new HttpError(409, `Barcode ${p.barcode} is already used`);
+  }
+  db.prepare('UPDATE product_packs SET active = 0 WHERE product_id = ?').run(productId);
+  const up = db.prepare(
+    `INSERT INTO product_packs (product_id, name, qty, barcode, active) VALUES (?, ?, ?, ?, 1)
+     ON CONFLICT (product_id, qty) DO UPDATE SET name = excluded.name, barcode = excluded.barcode, active = 1`,
+  );
+  // Clear barcodes first so swapping a barcode between two packs doesn't trip the unique index
+  db.prepare('UPDATE product_packs SET barcode = NULL WHERE product_id = ?').run(productId);
+  for (const p of packs) up.run(productId, p.name, p.qty, p.barcode);
+}
+
 function productRoutes(db) {
   const r = express.Router();
 
@@ -106,9 +157,11 @@ function productRoutes(db) {
       if (!byProduct.has(l.product_id)) byProduct.set(l.product_id, []);
       byProduct.get(l.product_id).push(l);
     }
+    const packs = packsByProduct(db);
     for (const row of rows) {
       row.available = row.on_hand - row.allocated - row.expired;
       row.levels = byProduct.get(row.id) || [];
+      row.packs = packs.get(row.id) || [];
     }
     res.json(rows);
   });
@@ -121,6 +174,7 @@ function productRoutes(db) {
       'Product',
     );
     product.available = product.on_hand - product.allocated - product.expired;
+    product.packs = packsByProduct(db, id).get(id) || [];
     product.levels = db
       .prepare(
         `SELECT s.warehouse_id, w.name AS warehouse_name, s.qty, s.bin,
@@ -160,7 +214,7 @@ function productRoutes(db) {
     const category = v.oneOf(b.category, 'Category', CATEGORIES, { required: true });
     const isUniform = category === 'Uniform';
     return {
-      sku: v.str(b.sku, 'SKU', { required: true, max: 40 }).toUpperCase(),
+      sku: skuOf(b.sku),
       name: v.str(b.name, 'Product name', { required: true }),
       client_id: v.int(b.client_id, 'Client', { required: true }),
       category,
@@ -196,8 +250,12 @@ function productRoutes(db) {
     assertClient(req.user, f.client_id);
     assertShelfCampaign(db, f.campaign_id, f.client_id);
     if (db.prepare('SELECT 1 FROM products WHERE sku = ?').get(f.sku)) throw new HttpError(409, `SKU ${f.sku} already exists`);
-    const id = insertProduct(f);
-    res.status(201).json(db.prepare('SELECT * FROM products WHERE id = ?').get(id));
+    const id = tx(db, () => {
+      const newId = insertProduct(f);
+      savePacks(db, newId, req.body.packs);
+      return newId;
+    });
+    res.status(201).json({ ...db.prepare('SELECT * FROM products WHERE id = ?').get(id), packs: packsByProduct(db, id).get(id) || [] });
   });
 
   /**
@@ -268,8 +326,9 @@ function productRoutes(db) {
     tx(db, () => {
       db.prepare(`UPDATE products SET ${COLS.map((c) => `${c}=?`).join(', ')} WHERE id=?`).run(...COLS.map((c) => f[c]), id);
       if (f.tracks_expiry !== existing.tracks_expiry) stock.setTracking(db, id, !!f.tracks_expiry);
+      savePacks(db, id, req.body.packs);
     });
-    res.json(db.prepare('SELECT * FROM products WHERE id = ?').get(id));
+    res.json({ ...db.prepare('SELECT * FROM products WHERE id = ?').get(id), packs: packsByProduct(db, id).get(id) || [] });
   });
 
   return r;
@@ -385,7 +444,13 @@ function stockRoutes(db) {
     const reference = v.str(req.body.reference, 'Reference', { max: 80 }) || `TRF-${Date.now().toString(36).toUpperCase()}`;
     const note = v.str(req.body.note, 'Note');
     const lines = v.items(req.body.items);
+    if (fromWarehouseId === toWarehouseId) throw new HttpError(400, 'Choose two different warehouses');
     tx(db, () => {
+      const expected = new Map();
+      for (const line of lines) {
+        const id = v.int(line.product_id, 'Product', { required: true });
+        expected.set(id, (expected.get(id) || 0) + v.int(line.qty, 'Quantity', { required: true, min: 1 }));
+      }
       for (const line of lines) {
         stock.transfer(db, {
           productId: v.int(line.product_id, 'Product', { required: true }),
@@ -397,6 +462,7 @@ function stockRoutes(db) {
           userId: req.user.id,
         });
       }
+      checkScansOut(db, req.user, { kind: 'transfer', reference, warehouseId: fromWarehouseId, expected, scans: req.body.scans, override: req.body.scan_override });
     });
     res.status(201).json({ ok: true, reference });
   });

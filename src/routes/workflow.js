@@ -6,6 +6,7 @@ const v = require('../validate');
 const stock = require('../stock');
 const { tx } = require('../db');
 const { assertCampaign, canManageCampaign } = require('../access');
+const { checkScansOut, scanCheckFor } = require('../scanout');
 
 const OPERATORS = [MANAGEMENT, WAREHOUSE];
 
@@ -158,6 +159,7 @@ function loadRequest(db, user, id) {
     .all(request.warehouse_id, request.warehouse_id, request.ref, id);
   request.handovers = db.prepare(`${HANDOVER_SELECT} WHERE h.request_id = ? ORDER BY h.id`).all(id);
   request.attachments = attachmentsFor(db, 'request_id', id);
+  request.scan_check = scanCheckFor(db, 'request', request.ref);
   return request;
 }
 
@@ -328,6 +330,7 @@ function requestRoutes(db) {
     tx(db, () => {
       let total = 0;
       const sent = [];
+      const expected = new Map();
       for (const item of request.items) {
         const qty = overrides.has(item.id)
           ? v.int(overrides.get(item.id), `Dispatched qty for ${item.sku}`, { required: true, min: 0, max: item.qty_approved })
@@ -345,6 +348,7 @@ function requestRoutes(db) {
           sent.push(item);
         }
         total += qty;
+        if (qty > 0) expected.set(item.product_id, (expected.get(item.product_id) || 0) + qty);
         db.prepare('UPDATE request_items SET qty_dispatched = ? WHERE id = ?').run(qty, item.id);
       }
       if (total === 0) throw new HttpError(400, 'Nothing to dispatch');
@@ -352,6 +356,7 @@ function requestRoutes(db) {
       if (uniforms && !(handover.uniform_clean && handover.uniform_ironed)) {
         throw new HttpError(400, 'Check that the uniforms are clean and ironed before issuing them');
       }
+      checkScansOut(db, req.user, { kind: 'request', reference: request.ref, warehouseId: request.warehouse_id, expected, scans: req.body.scans, override: req.body.scan_override });
       const now = new Date().toISOString();
       db.prepare(
         `UPDATE requests SET status = ?, dispatched_by = ?, dispatched_at = ?, delivered_at = ?, courier = ?, waybill = ? WHERE id = ?`,

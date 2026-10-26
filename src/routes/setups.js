@@ -6,6 +6,7 @@ const v = require('../validate');
 const stock = require('../stock');
 const { tx } = require('../db');
 const { assertCampaign, canManageCampaign } = require('../access');
+const { checkScansOut, scanCheckFor } = require('../scanout');
 const { campaignProducts } = require('./campaigns');
 
 /**
@@ -81,6 +82,7 @@ function loadSetup(db, user, id) {
        FROM attachments a JOIN users u ON u.id = a.uploaded_by WHERE a.setup_id = ? ORDER BY a.id`,
     )
     .all(id);
+  s.scan_check = scanCheckFor(db, 'setup', s.ref);
   const onCrew = s.lead_id === user.id || s.crew.some((c) => c.id === user.id);
   const campaign = { id: s.campaign_id, account_manager_id: s.account_manager_id };
   s.can_plan = ['scheduled'].includes(s.status) && (canManageCampaign(user, campaign) || user.role === 'warehouse_manager');
@@ -208,6 +210,8 @@ function setupRoutes(db) {
         });
         db.prepare('UPDATE setup_items SET qty_out = ? WHERE id = ?').run(item.qty, item.id);
       }
+      const expected = new Map(s.items.map((i) => [i.product_id, i.qty]));
+      checkScansOut(db, req.user, { kind: 'setup', reference: s.ref, warehouseId: s.warehouse_id, expected, scans: (req.body || {}).scans, override: (req.body || {}).scan_override });
       db.prepare("UPDATE setups SET status = 'loaded', loaded_by = ?, loaded_at = ? WHERE id = ?").run(req.user.id, new Date().toISOString(), s.id);
     });
     res.json(loadSetup(db, req.user, s.id));

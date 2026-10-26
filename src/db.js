@@ -475,6 +475,50 @@ const MIGRATIONS = [
   -- Count approvals are by units only (no money in the system)
   DELETE FROM settings WHERE key = 'count_tolerance_value';
   `,
+
+  // v6: packs (6-packs, boxes of 24) with their own QR codes, and scanning stock out of the warehouse
+  `
+  CREATE TABLE product_packs (
+    id INTEGER PRIMARY KEY,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    name TEXT NOT NULL,
+    qty INTEGER NOT NULL CHECK (qty >= 2),
+    barcode TEXT UNIQUE,
+    active INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (product_id, qty)
+  );
+
+  -- Every label scanned as stock leaves (dispatch, counter issue, setup load-out, transfer)
+  CREATE TABLE scans_out (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('request','setup','transfer')),
+    reference TEXT NOT NULL,
+    warehouse_id INTEGER REFERENCES warehouses(id),
+    code TEXT NOT NULL,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    pack_id INTEGER REFERENCES product_packs(id),
+    units INTEGER NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX idx_scans_out_ref ON scans_out(kind, reference);
+
+  -- One per load-out: did the scans match, or did a manager release it without a full scan?
+  CREATE TABLE scan_checks (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('request','setup','transfer')),
+    reference TEXT NOT NULL,
+    warehouse_id INTEGER REFERENCES warehouses(id),
+    expected_units INTEGER NOT NULL,
+    scanned_units INTEGER NOT NULL,
+    matched INTEGER NOT NULL,
+    override_reason TEXT,
+    differences TEXT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX idx_scan_checks_ref ON scan_checks(kind, reference);
+  `,
 ];
 
 function migrate(db) {

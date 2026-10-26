@@ -67,8 +67,15 @@ Worked out live and cleared automatically once dealt with:
 - **Stock health:** expired and soon-to-expire batches, low stock, uniforms waiting at the laundry.
 
 ### QR codes everywhere
-- Print **QR labels** for any product (3 across on A4, fits 63×38 mm label sheets), including per-batch labels with the expiry date.
-- Scan with a phone camera (or a handheld USB/Bluetooth scanner) to look up an item, add items when receiving, **tick items off while picking** (wrong items are flagged), or open a request from its picking slip.
+- **Add items** from *Stock on hand*, *QR labels* or straight from *Receive stock* (**+ Add item / + New item**). Each new item shows its QR codes right away, ready to print.
+- Every item has its own QR code, and so does each **pack**: drinks in a **6-pack** or a **box of 24** get a pack QR, and scanning it counts all the units in it. A pack can also carry the supplier's box barcode.
+- Print **QR labels** for any item or pack (3 across on A4, fits 63×38 mm label sheets). Labels show the product name, and batch labels show the **expiry date**. The QR code itself also holds the name (and pack and expiry), so any ordinary phone camera shows what the label is.
+- Scan with a phone camera (or a handheld USB/Bluetooth scanner) to look up an item, add items when receiving or counting (packs add all their units), or open a request from its picking slip.
+
+### Scanning stock out
+- **Everything that leaves the warehouse is scanned**: stock issued at the counter, courier and vehicle dispatches, setup load-outs and transfers. The screen ticks off each line as you scan, refuses items that aren't going out, and won't let a box of 24 count when only 6 more should go (open it and scan singles).
+- The stock can't be released until the scans match what's going out. If labels are damaged, only the **warehouse manager** (or office/directors) can release it without a full scan, with a reason. Floor staff can't.
+- Every scan is logged with who did it, and each request and setup shows "✓ Scanned out" or "Not fully scanned", with the reason and the differences.
 
 ### Waybill and delivery photos
 - When booking in a delivery, snap the **waybill or delivery note** with the phone camera (or attach a PDF). More photos can be added later under **Deliveries & waybills**, which lists every delivery and flags any without photos.
@@ -77,7 +84,7 @@ Worked out live and cleared automatically once dealt with:
 
 ### Stock counts (loss control)
 - **Blind counts:** whoever counts never sees the system quantity. They enter what's physically on the shelf (or scan items, one scan per unit) and submit.
-- On submit the system compares. Exact matches close straight away. **Small differences** within the tolerance you set (e.g. up to 2 units *and* up to R200) are adjusted automatically. **Anything bigger waits for a manager**, and stock isn't changed until then.
+- On submit the system compares. Exact matches close straight away. **Small differences** within the tolerance you set (e.g. up to 2 units) are adjusted automatically. **Anything bigger waits for a manager**, and stock isn't changed until then.
 - Managers **approve** (stock is adjusted, the ledger records who counted and who approved), **reject** with a reason, or **send for recount** by someone else. **Nobody can approve a count they did themselves** (directors excepted).
 - **Daily cycle counts:** one click picks the products counted longest ago (never-counted first, then the most units), in bin order, for a chosen staff member. Reminders flag stock not counted in 90 days.
 - **Shrinkage report:** missing, found, damaged and expired units, by warehouse and product, plus each person's counting accuracy.
@@ -160,7 +167,7 @@ Set a `SESSION_SECRET` environment variable there: logins then use signed tokens
 npm test
 ```
 
-The tests run the API end to end against an in-memory database: the full request → approve → issue (signature + uniform check) → use → return (with laundry) cycle, expiry batches and first-expiry-first-out picking, uniform ranges, QR/badge scanning, waybill uploads, campaign plans and kits, role permissions, transaction rollback, upgrading an older database, and a final check that the ledger reconciles with warehouse, field and laundry stock (and batch totals) for every product.
+The tests run the API end to end against an in-memory database: the full request → approve → issue (signature + uniform check) → use → return (with laundry) cycle, expiry batches and first-expiry-first-out picking, packs and scanning stock out, uniform ranges, QR/badge scanning, waybill uploads, campaign plans and kits, role permissions, transaction rollback, upgrading an older database, and a final check that the ledger reconciles with warehouse, field and laundry stock (and batch totals) for every product.
 
 ### Project layout
 
@@ -173,6 +180,7 @@ src/
   access.js         row-level rules (who can see which campaign)
   colours.js        campaign shelf colours
   stock.js          all stock changes and ledger writes go through here (batches, laundry, write-offs)
+  scanout.js        reading label codes (items, packs) and checking scans as stock leaves
   routes/
     admin.js        login, users, warehouses, clients
     inventory.js    products, receive, transfer, stock take, ledger, CSV

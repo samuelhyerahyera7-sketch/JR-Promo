@@ -5,10 +5,13 @@ const QRCode = require('qrcode');
 const { MANAGEMENT, WAREHOUSE, HttpError, allow, isManagement, isWarehouse } = require('../auth');
 const v = require('../validate');
 const { tx } = require('../db');
+const { codePart, resolveStockCode } = require('../scanout');
 
 /**
  * QR code contents:
  *   JRP:<SKU>[:<batch>]  product label (optionally a specific batch)
+ *   JRK:<SKU>:<qty>[:<batch>]  pack label (6-pack, box of 24…)
+ * Text after a '|' is only for people reading the code (name, pack, expiry).
  *   JRU:<badge code>     promoter ID badge
  *   JRR:<request ref>    picking slip / stock request
  *   JRC:<campaign id>    campaign shelf sign
@@ -20,7 +23,7 @@ function qrRoutes(db) {
 
   r.get('/qr.svg', async (req, res, next) => {
     try {
-      const text = v.str(req.query.text, 'Text', { required: true, max: 200 });
+      const text = v.str(req.query.text, 'Text', { required: true, max: 300 });
       const svg = await QRCode.toString(text, { type: 'svg', margin: 1, errorCorrectionLevel: 'M' });
       res.set('Content-Type', 'image/svg+xml');
       res.set('Cache-Control', 'private, max-age=604800');
@@ -31,8 +34,8 @@ function qrRoutes(db) {
   });
 
   r.get('/scan', (req, res) => {
-    const raw = v.str(req.query.code, 'Code', { required: true, max: 200 });
-    const [prefix, a, b] = raw.split(':');
+    const raw = codePart(v.str(req.query.code, 'Code', { required: true, max: 200 }));
+    const [prefix, a] = raw.split(':');
     const user = req.user;
     const seesStock = user.role !== 'promoter';
 
@@ -52,11 +55,18 @@ function qrRoutes(db) {
       return res.json({ kind: 'campaign', id: campaign.id, name: campaign.name });
     }
 
-    const findProduct = (sku) => db.prepare('SELECT id, sku, name, category FROM products WHERE sku = ?').get(sku);
-    if (prefix === 'JRP') {
-      const product = findProduct(a || '');
-      if (!product) throw new HttpError(404, 'Unknown product label');
-      return res.json({ kind: 'product', product, batch_no: b || null, can_view: seesStock });
+    const productHit = (hit) => ({
+      kind: 'product',
+      product: hit.product,
+      pack: hit.pack ? { id: hit.pack.id, name: hit.pack.name, qty: hit.pack.qty } : null,
+      units: hit.units,
+      batch_no: hit.batch_no,
+      can_view: seesStock,
+    });
+    if (prefix === 'JRP' || prefix === 'JRK') {
+      const hit = resolveStockCode(db, raw);
+      if (!hit) throw new HttpError(404, prefix === 'JRK' ? 'Unknown pack label' : 'Unknown product label');
+      return res.json(productHit(hit));
     }
 
     const ref = prefix === 'JRR' ? a : raw;
@@ -65,8 +75,8 @@ function qrRoutes(db) {
     const ret = db.prepare('SELECT id, ref FROM returns WHERE ref = ?').get(ref.toUpperCase());
     if (ret) return res.json({ kind: 'return', id: ret.id, ref: ret.ref });
 
-    const product = findProduct(raw) || db.prepare('SELECT id, sku, name, category FROM products WHERE barcode = ?').get(raw);
-    if (product) return res.json({ kind: 'product', product, batch_no: null, can_view: seesStock });
+    const hit = resolveStockCode(db, raw);
+    if (hit) return res.json(productHit(hit));
     throw new HttpError(404, `Nothing found for "${raw}"`);
   });
 

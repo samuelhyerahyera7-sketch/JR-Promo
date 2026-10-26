@@ -33,6 +33,13 @@ async function call(who, method, path, body) {
 // 1x1 transparent PNG, standing in for a drawn signature
 const SIG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
+// Labels scanned as stock leaves, one unit each: scans('SKU-A', 3, 'SKU-B', 1)
+const scans = (...pairs) => {
+  const out = [];
+  for (let i = 0; i < pairs.length; i += 2) for (let n = 0; n < pairs[i + 1]; n++) out.push(`JRP:${pairs[i]}`);
+  return out;
+};
+
 const id = (sql, ...params) => db.prepare(sql).get(...params).id;
 const qty = (sku, warehouse) =>
   db
@@ -160,8 +167,18 @@ test('full request lifecycle: request → approve → dispatch → deliver → u
   assert.match(dirty.data.error, /clean and ironed/);
   assert.equal(qty('SFJ-UNI-TEE', 'JHB Main'), teeBefore, 'failed handover moved no stock');
 
+  // Everything going out must be scanned
+  const short = await call('warehouse', 'POST', `/requests/${reqId}/dispatch`, {
+    handover: { signature: SIG, uniform_clean: true, uniform_ironed: true },
+    scans: scans('SFJ-UNI-TEE', 3, 'SFJ-POS-AFR', 1),
+  });
+  assert.equal(short.status, 409);
+  assert.match(short.data.error, /SFJ-UNI-TEE: scanned 3 of 4/);
+  assert.equal(qty('SFJ-UNI-TEE', 'JHB Main'), teeBefore, 'unscanned stock did not move');
+
   const issued = await call('warehouse', 'POST', `/requests/${reqId}/dispatch`, {
     handover: { signature: SIG, uniform_clean: true, uniform_ironed: true },
+    scans: scans('SFJ-UNI-TEE', 4, 'SFJ-POS-AFR', 1),
   });
   assert.equal(issued.status, 200, JSON.stringify(issued.data));
   assert.equal(issued.data.status, 'delivered', 'collected in person = delivered');
@@ -282,7 +299,7 @@ test('receive, transfer and stock take update stock and the ledger', async () =>
   assert.equal(rec.status, 201, JSON.stringify(rec.data));
   assert.equal(qty('PRS-GFT-BAG', 'Durban'), before + 50);
 
-  const trf = await call('warehouse', 'POST', '/stock/transfer', { from_warehouse_id: dbn, to_warehouse_id: cpt, items: [{ product_id: bag, qty: 20 }] });
+  const trf = await call('warehouse', 'POST', '/stock/transfer', { from_warehouse_id: dbn, to_warehouse_id: cpt, items: [{ product_id: bag, qty: 20 }], scans: scans('PRS-GFT-BAG', 20) });
   assert.equal(trf.status, 201);
   assert.equal(qty('PRS-GFT-BAG', 'Durban'), before + 30);
 
@@ -355,7 +372,7 @@ test('expiry: receiving needs a date, dispatch skips expired batches, earliest e
     campaign_id: campaign, promoter_id: kagiso, warehouse_id: jhb, delivery_method: 'company_vehicle', items: [{ product_id: sachet, qty: 40 }],
   });
   assert.equal(req.status, 201, JSON.stringify(req.data));
-  const sent = await call('warehouse', 'POST', `/requests/${req.data.id}/dispatch`, {});
+  const sent = await call('warehouse', 'POST', `/requests/${req.data.id}/dispatch`, { scans: scans('KCC-SMP-SCH', 40) });
   assert.equal(sent.status, 200, JSON.stringify(sent.data));
   const moves = db.prepare("SELECT batch_no, qty FROM movements WHERE type = 'dispatch' AND reference = ? ORDER BY id").all(req.data.ref);
   assert.equal(moves[0].batch_no, 'SOON');
@@ -501,7 +518,7 @@ test('geotags are stored on activation reports, handovers and photos', async () 
   const jhb = id("SELECT id FROM warehouses WHERE name = 'JHB Main'");
   const req = await call('lerato', 'POST', '/requests', { campaign_id: campaign, promoter_id: kagiso, warehouse_id: jhb, items: [{ product_id: cups, qty: 1 }] });
   const midrand = { lat: -25.9992, lng: 28.1263, accuracy: 20 };
-  const issued = await call('warehouse', 'POST', `/requests/${req.data.id}/dispatch`, { handover: { signature: SIG, location: midrand } });
+  const issued = await call('warehouse', 'POST', `/requests/${req.data.id}/dispatch`, { handover: { signature: SIG, location: midrand }, scans: scans('SFJ-CUP-50', 1) });
   assert.equal(issued.status, 200, JSON.stringify(issued.data));
   assert.equal(issued.data.handovers[0].lat, midrand.lat);
   const log = (await call('director', 'GET', '/handovers')).data.find((h) => h.request_id === req.data.id);
@@ -707,7 +724,7 @@ test('setups: book, load out, set up, strike down, check back in', async () => {
   // Fix the equipment list and load again
   const edited = await call('pieter', 'PUT', `/setups/${s.id}`, { ...body, items: [{ product_id: table, qty: 1 }, { product_id: pullup, qty: 2 }] });
   assert.equal(edited.status, 200, JSON.stringify(edited.data));
-  const out = (await call('manager', 'POST', `/setups/${s.id}/load`)).data;
+  const out = (await call('manager', 'POST', `/setups/${s.id}/load`, { scans: scans('JR-TBL-FOLD', 1, 'PRS-PUB-85', 2) })).data;
   assert.equal(out.status, 'loaded');
   assert.equal(qty('PRS-PUB-85', 'Cape Town'), before.pullup - 2);
   const held = db.prepare('SELECT qty FROM field_stock WHERE product_id = ? AND promoter_id = ? AND campaign_id = ?').get(pullup, liam, campaign);
@@ -730,6 +747,73 @@ test('setups: book, load out, set up, strike down, check back in', async () => {
   assert.equal(qty('PRS-PUB-85', 'Cape Town'), before.pullup - 1);
   assert.equal(qty('JR-TBL-FOLD', 'Cape Town'), before.table, 'table came back by default');
   assert.equal(back.attachments.length, 1);
+});
+
+test('packs have their own QR codes and count as many units when scanned out', async () => {
+  const jhb = id("SELECT id FROM warehouses WHERE name = 'JHB Main'");
+  const cpt = id("SELECT id FROM warehouses WHERE name = 'Cape Town'");
+  const house = id('SELECT id FROM clients WHERE is_house = 1');
+
+  // Add an item with packs; SKUs can't contain the code separators
+  const bad = await call('manager', 'POST', '/products', { sku: 'TST:1', name: 'x', client_id: house, category: 'Sample' });
+  assert.equal(bad.status, 400);
+  const made = await call('manager', 'POST', '/products', {
+    sku: 'tst-can', name: 'Test can 330ml', client_id: house, category: 'Sample',
+    packs: [{ qty: 6, name: '6-pack' }, { qty: 24, name: 'Box of 24', barcode: '6009999000024' }],
+  });
+  assert.equal(made.status, 201, JSON.stringify(made.data));
+  assert.deepEqual(made.data.packs.map((p) => [p.name, p.qty]), [['6-pack', 6], ['Box of 24', 24]]);
+  assert.equal((await call('manager', 'PUT', `/products/${made.data.id}`, { ...made.data, packs: [{ qty: 6 }, { qty: 6 }] })).status, 400);
+
+  // A pack label is read with its readable text (name, pack, expiry) after the '|'
+  const hit = (await call('warehouse', 'GET', `/scan?code=${encodeURIComponent('JRK:SFJ-DRK-330:24|Sunfresh Mango 330ml can|Box of 24|EXP 2027-02-01')}`)).data;
+  assert.equal(hit.product.sku, 'SFJ-DRK-330');
+  assert.equal(hit.units, 24);
+  assert.equal(hit.pack.name, 'Box of 24');
+  assert.equal((await call('warehouse', 'GET', '/scan?code=JRK:SFJ-DRK-330:12')).status, 404, 'no 12-pack');
+
+  // The seeded counter request: 54 cans and 2 sleeves of cups
+  const req = db
+    .prepare(`SELECT r.id FROM requests r JOIN request_items ri ON ri.request_id = r.id JOIN products p ON p.id = ri.product_id
+              WHERE p.sku = 'SFJ-DRK-330' AND r.status = 'approved'`)
+    .get();
+  const caseBarcode = db.prepare("SELECT pk.barcode FROM product_packs pk JOIN products p ON p.id = pk.product_id WHERE p.sku = 'SFJ-DRK-330' AND pk.qty = 24").get().barcode;
+  const cansBefore = qty('SFJ-DRK-330', 'JHB Main');
+  const handover = { signature: SIG };
+  const unknown = await call('warehouse', 'POST', `/requests/${req.id}/dispatch`, { handover, scans: ['JRP:NOPE'] });
+  assert.equal(unknown.status, 400);
+  assert.match(unknown.data.error, /Unknown label/);
+  const issued = await call('warehouse', 'POST', `/requests/${req.id}/dispatch`, {
+    handover,
+    // Box of 24 by QR, another by its supplier barcode, a 6-pack, and the cups one by one
+    scans: ['JRK:SFJ-DRK-330:24|Sunfresh Mango 330ml can|Box of 24', caseBarcode, 'JRK:SFJ-DRK-330:6', 'JRP:SFJ-CUP-50', 'JRP:SFJ-CUP-50|Tasting cups'],
+  });
+  assert.equal(issued.status, 200, JSON.stringify(issued.data));
+  assert.equal(qty('SFJ-DRK-330', 'JHB Main'), cansBefore - 54);
+  assert.equal(issued.data.scan_check.matched, 1);
+  assert.equal(issued.data.scan_check.scanned_units, 56);
+  assert.equal(issued.data.scan_check.user_name, 'Sipho Nkosi');
+  const logged = db.prepare("SELECT code, units, pack_id FROM scans_out WHERE kind = 'request' AND reference = (SELECT ref FROM requests WHERE id = ?) ORDER BY id").all(req.id);
+  assert.deepEqual(logged.map((l) => l.units), [24, 24, 6, 1, 1]);
+  assert.equal(logged[0].code, 'JRK:SFJ-DRK-330:24', 'readable text is not stored as the code');
+
+  // Releasing without a full scan: warehouse manager only, with a reason
+  const mug = id("SELECT id FROM products WHERE sku = 'KCC-GFT-MUG'");
+  const move = { from_warehouse_id: jhb, to_warehouse_id: cpt, items: [{ product_id: mug, qty: 5 }] };
+  assert.equal((await call('warehouse', 'POST', '/stock/transfer', move)).status, 409);
+  assert.equal((await call('warehouse', 'POST', '/stock/transfer', { ...move, scan_override: 'Labels torn' })).status, 403);
+  const released = await call('manager', 'POST', '/stock/transfer', { ...move, reference: 'TRF-OVR', scans: scans('KCC-GFT-MUG', 2), scan_override: 'Labels torn' });
+  assert.equal(released.status, 201, JSON.stringify(released.data));
+  const check = db.prepare("SELECT * FROM scan_checks WHERE kind = 'transfer' AND reference = 'TRF-OVR'").get();
+  assert.equal(check.matched, 0);
+  assert.equal(check.override_reason, 'Labels torn');
+  assert.match(check.differences, /KCC-GFT-MUG: scanned 2 of 5/);
+
+  // Removing a pack retires its code
+  const kept = await call('manager', 'PUT', `/products/${made.data.id}`, { ...made.data, packs: [{ qty: 24, name: 'Case' }] });
+  assert.equal(kept.status, 200, JSON.stringify(kept.data));
+  assert.deepEqual(kept.data.packs.map((p) => [p.name, p.qty, p.barcode]), [['Case', 24, null]]);
+  assert.equal((await call('warehouse', 'GET', '/scan?code=JRK:TST-CAN:6')).status, 404);
 });
 
 test('signed sessions work across separate copies of the app (serverless demo)', async () => {

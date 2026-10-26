@@ -732,6 +732,36 @@ test('setups: book, load out, set up, strike down, check back in', async () => {
   assert.equal(back.attachments.length, 1);
 });
 
+test('signed sessions work across separate copies of the app (serverless demo)', async () => {
+  process.env.SESSION_SECRET = 'test-secret-for-two-copies';
+  const copies = [];
+  try {
+    for (let i = 0; i < 2; i++) {
+      const copyDb = open(':memory:');
+      seed(copyDb);
+      const srv = createApp(copyDb).listen(0);
+      await new Promise((r) => srv.once('listening', r));
+      copies.push({ srv, url: `http://127.0.0.1:${srv.address().port}` });
+    }
+    const login = await fetch(`${copies[0].url}/api/auth/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'manager@jrpromo.test', password: DEMO_PASSWORD }),
+    }).then((r) => r.json());
+    // Signed in on copy 1, the token works on copy 2, by header and by cookie
+    const byHeader = await fetch(`${copies[1].url}/api/auth/me`, { headers: { Authorization: `Bearer ${login.token}` } });
+    assert.equal(byHeader.status, 200);
+    assert.equal((await byHeader.json()).name, 'Bongani Mthembu');
+    const byCookie = await fetch(`${copies[1].url}/api/dashboard`, { headers: { Cookie: `jr_session=${login.token}` } });
+    assert.equal(byCookie.status, 200);
+    // Tampering with the user id or signature is rejected
+    const [, exp, mac] = login.token.split('.');
+    assert.equal((await fetch(`${copies[1].url}/api/auth/me`, { headers: { Authorization: `Bearer 1.${exp}.${mac}` } })).status, 401);
+    assert.equal((await fetch(`${copies[1].url}/api/auth/me`, { headers: { Authorization: `Bearer ${login.token.slice(0, -2)}00` } })).status, 401);
+  } finally {
+    delete process.env.SESSION_SECRET;
+    copies.forEach((c) => c.srv.close());
+  }
+});
+
 // Runs last so it checks the ledger after every other test has moved stock
 test('ledger reconciles with stock tables for every product', () => {
   const rows = db

@@ -33,7 +33,27 @@ function verifyPassword(password, stored) {
   return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
 }
 
+/**
+ * Signed sessions: when SESSION_SECRET is set (e.g. on serverless hosting where several
+ * copies of the app run side by side), the token itself carries the user id and expiry
+ * and is signed, so any copy can verify it without a shared sessions table.
+ */
+const signSession = (body) => crypto.createHmac('sha256', process.env.SESSION_SECRET).update(body).digest('hex');
+
+function verifySignedSession(token) {
+  const [uid, exp, mac] = token.split('.');
+  if (!uid || !exp || !mac || Number(exp) < Date.now()) return null;
+  const expected = Buffer.from(signSession(`${uid}.${exp}`), 'hex');
+  const given = Buffer.from(mac, 'hex');
+  if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) return null;
+  return Number(uid);
+}
+
 function createSession(db, userId) {
+  if (process.env.SESSION_SECRET) {
+    const body = `${userId}.${Date.now() + SESSION_DAYS * 864e5}`;
+    return `${body}.${signSession(body)}`;
+  }
   const token = crypto.randomBytes(32).toString('hex');
   const expires = new Date(Date.now() + SESSION_DAYS * 864e5).toISOString();
   db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expires);
@@ -44,7 +64,7 @@ function readToken(req) {
   const header = req.get('authorization') || '';
   if (header.startsWith('Bearer ')) return header.slice(7);
   const cookie = req.get('cookie') || '';
-  const match = cookie.match(/(?:^|;\s*)jr_session=([a-f0-9]+)/);
+  const match = cookie.match(/(?:^|;\s*)jr_session=([a-f0-9.]+)/);
   return match ? match[1] : null;
 }
 
@@ -53,9 +73,18 @@ function authenticate(db) {
     SELECT u.id, u.name, u.email, u.role, u.region, u.phone, u.warehouse_id, u.gender, u.uniform_size, u.badge_code
     FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token = ? AND s.expires_at > ? AND u.active = 1`);
+  const byId = db.prepare(
+    'SELECT u.id, u.name, u.email, u.role, u.region, u.phone, u.warehouse_id, u.gender, u.uniform_size, u.badge_code FROM users u WHERE u.id = ? AND u.active = 1',
+  );
   return (req, res, next) => {
     const token = readToken(req);
-    const user = token && stmt.get(token, new Date().toISOString());
+    let user = null;
+    if (token && process.env.SESSION_SECRET && token.includes('.')) {
+      const uid = verifySignedSession(token);
+      user = uid && byId.get(uid);
+    } else if (token) {
+      user = stmt.get(token, new Date().toISOString());
+    }
     if (!user) return next(new HttpError(401, 'Please sign in'));
     req.user = { ...user };
     req.token = token;

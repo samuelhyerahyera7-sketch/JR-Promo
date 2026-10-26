@@ -66,7 +66,7 @@ function seed(db) {
       ins(
         `INSERT INTO users (name, email, phone, role, region, warehouse_id, gender, uniform_size, badge_code, password_hash)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        name, email, phone, role, region, warehouseId, gender, size, crypto.randomBytes(10).toString('hex'), hash,
+        name, email, phone, role, region, warehouseId, gender, size, crypto.createHash('sha256').update(`demo-badge:${email}`).digest('hex').slice(0, 20), hash,
       );
 
     const u = {

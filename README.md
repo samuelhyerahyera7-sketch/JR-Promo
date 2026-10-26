@@ -138,6 +138,8 @@ Then sign in and set up, in this order: **Warehouses → Staff & users → Clien
 
 `api/index.js` and `vercel.json` let the app run on Vercel as a **demo**: the database lives in the function's temporary storage and is refilled with demo data whenever a fresh instance starts, so nothing entered is kept. Use it to try things out, not for real stock.
 
+Set a `SESSION_SECRET` environment variable there: logins then use signed tokens that every copy of the function accepts, instead of a sessions table only one copy can see. Turn on Fluid compute so one copy handles concurrent requests; separate copies still keep separate demo data.
+
 ### Configuration
 
 | Variable | Default | Purpose |

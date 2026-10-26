@@ -149,6 +149,7 @@ function seed(db) {
         }
       }
     }
+    const WAREHOUSE_GPS = { [wh.jhb]: [-25.9992, 28.1263], [wh.cpt]: [-33.864, 18.523], [wh.dbn]: [-29.81, 30.858] };
     const day = (offset) => new Date(Date.now() + offset * 864e5).toISOString().slice(0, 10);
 
     // Back-date the ledger so the dashboard has a history to show
@@ -242,10 +243,14 @@ function seed(db) {
         const uniforms = lines.some(([pid]) => db.prepare('SELECT category FROM products WHERE id = ?').get(pid).category === 'Uniform');
         const handover = (kind, staffId, signed, daysBack) =>
           ins(
-            `INSERT INTO handovers (kind, request_id, promoter_id, staff_id, warehouse_id, signature, uniform_clean, uniform_ironed, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO handovers (kind, request_id, promoter_id, staff_id, warehouse_id, signature, uniform_clean, uniform_ironed, created_at,
+               lat, lng, accuracy)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             kind, id, promoterId, staffId, staffId ? warehouseId : null, signed ? demoSignature(id) : null,
             kind !== 'delivery' && uniforms ? 1 : null, kind !== 'delivery' && uniforms ? 1 : null, stamp(daysBack, 10),
+            // Counter handovers are geotagged at the warehouse; courier deliveries were confirmed before geotagging existed
+            kind === 'collection' ? WAREHOUSE_GPS[warehouseId][0] : null, kind === 'collection' ? WAREHOUSE_GPS[warehouseId][1] : null,
+            kind === 'collection' ? 15 : null,
           );
         if (method === 'collect') {
           handover('collection', dispatcher, true, daysAgo - 1);
@@ -289,10 +294,34 @@ function seed(db) {
 
     // Promoter activation reports
     let useNo = 0;
+    // Approximate public locations of the demo stores, for activation geotags
+    const PLACES = {
+      'Checkers Hyper Sandton City': [-26.1086, 28.0527],
+      'Pick n Pay Rosebank': [-26.1458, 28.0436],
+      'Spar Fourways Crossing': [-26.018, 28.008],
+      'Woolworths Menlyn': [-25.7826, 28.2775],
+      'Shoprite Soweto Maponya Mall': [-26.2595, 27.8796],
+      'Pick n Pay Gateway Umhlanga': [-29.7275, 31.0663],
+      'Spar Pinetown': [-29.8167, 30.8667],
+      'Checkers Pavilion': [-29.8495, 30.9354],
+      'Warwick Junction taxi rank': [-29.8566, 31.0119],
+      'Shoprite Durban Station': [-29.8494, 31.0228],
+      'Clicks Canal Walk': [-33.8935, 18.5115],
+      'Dis-Chem V&A Waterfront': [-33.9036, 18.4207],
+      'Clicks Tyger Valley': [-33.8735, 18.6347],
+      'Woolworths Cavendish': [-33.9893, 18.4669],
+      'Park Station concourse': [-26.1975, 28.042],
+    };
+    const jitter = () => (Math.random() - 0.5) * 0.0008;
+    let usageCount = 0;
     const usage = (daysAgo, campaignId, promoterId, store, lines) => {
+      usageCount += 1;
+      // A few reports without a location, as happens when a phone denies GPS
+      const place = usageCount % 9 === 0 ? null : PLACES[store];
       const id = ins(
-        'INSERT INTO usage_reports (campaign_id, promoter_id, report_date, store, created_at) VALUES (?, ?, ?, ?, ?)',
+        'INSERT INTO usage_reports (campaign_id, promoter_id, report_date, store, created_at, lat, lng, accuracy) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
         campaignId, promoterId, day(-daysAgo), store, stamp(daysAgo, 17),
+        place ? place[0] + jitter() : null, place ? place[1] + jitter() : null, place ? 8 + Math.round(Math.random() * 25) : null,
       );
       useNo = id;
       dated(daysAgo, () => {

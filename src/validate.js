@@ -63,10 +63,23 @@ function items(value, field = 'items') {
   return value;
 }
 
+/**
+ * Optional phone GPS position {lat, lng, accuracy} (accuracy in metres).
+ * Returns nulls when absent so callers can store it straight away.
+ */
+function geo(value) {
+  if (value === undefined || value === null || value === '') return { lat: null, lng: null, accuracy: null };
+  const lat = num(value.lat, 'Latitude', { required: true, min: -90 });
+  const lng = num(value.lng, 'Longitude', { required: true, min: -180 });
+  if (lat > 90 || lng > 180) throw new HttpError(400, 'Location is out of range');
+  const accuracy = num(value.accuracy, 'Location accuracy', { min: 0 });
+  return { lat, lng, accuracy: accuracy === null ? null : Math.round(accuracy) };
+}
+
 /** Throws 404 when a row lookup came back empty. */
 function found(row, what) {
   if (!row) throw new HttpError(404, `${what} not found`);
   return row;
 }
 
-module.exports = { str, int, num, oneOf, date, email, items, found };
+module.exports = { str, int, num, oneOf, date, email, items, found, geo };

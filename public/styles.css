@@ -164,10 +164,10 @@ button.small, .btn.small { padding: 5px 10px; font-size: 0.85rem; }
 
 /* ---------- modal ---------- */
 .modal-back { position: fixed; inset: 0; background: rgba(15, 30, 40, 0.45); display: grid; place-items: start center; z-index: 50; overflow-y: auto; padding: 5vh 12px; }
-.modal { background: #fff; border-radius: 12px; width: min(760px, 100%); box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25); }
+.modal { background: #fff; border-radius: 12px; width: min(760px, 100%); min-width: 0; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25); }
 .modal header { display: flex; justify-content: space-between; align-items: center; padding: 16px 18px; border-bottom: 1px solid var(--border); }
 .modal header button { background: transparent; color: var(--muted); font-size: 1.4rem; padding: 0 6px; }
-.modal .body { padding: 18px; }
+.modal .body { padding: 18px; overflow-x: hidden; }
 .modal footer { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 18px; border-top: 1px solid var(--border); flex-wrap: wrap; }
 
 /* ---------- toasts ---------- */
@@ -234,6 +234,13 @@ tr.uniform-row td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 .signature { max-width: 100%; height: 70px; object-fit: contain; object-position: left; border-bottom: 1px solid var(--border); }
 button.big, .btn.big { padding: 13px 20px; font-size: 1.05rem; }
+
+/* ---------- geotags ---------- */
+.geo-status { margin-top: 10px; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); font-size: 0.88rem; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.geo-status.ok { background: #dff5e7; color: var(--ok); }
+.geo-status.warn { background: #fff1d6; color: var(--warn); }
+.geo-link { white-space: nowrap; }
+.thumb .geo-link { font-size: 0.78rem; }
 
 /* ---------- counter ---------- */
 .session { border-left: 4px solid var(--accent); }

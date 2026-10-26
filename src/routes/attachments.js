@@ -58,10 +58,12 @@ function attachmentRoutes(db) {
     if (!MIME.includes(mime)) throw new HttpError(400, 'Only JPG, PNG, WebP photos or PDF files can be uploaded');
     const data = Buffer.from(match[2], 'base64');
     if (data.length > MAX_BYTES) throw new HttpError(400, 'File is larger than 8 MB');
+    const location = v.geo(b.location);
     const info = db
       .prepare(
-        `INSERT INTO attachments (kind, reference, warehouse_id, request_id, return_id, caption, filename, mime, size, data, uploaded_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO attachments (kind, reference, warehouse_id, request_id, return_id, caption, filename, mime, size, data, uploaded_by,
+           lat, lng, accuracy)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         a.kind,
@@ -75,6 +77,9 @@ function attachmentRoutes(db) {
         data.length,
         data,
         req.user.id,
+        location.lat,
+        location.lng,
+        location.accuracy,
       );
     res.status(201).json({ id: info.lastInsertRowid });
   });
@@ -94,7 +99,7 @@ function attachmentRoutes(db) {
     res.json(
       db
         .prepare(
-          `SELECT a.id, a.kind, a.caption, a.filename, a.mime, a.size, a.created_at, a.uploaded_by, u.name AS uploaded_by_name
+          `SELECT a.id, a.kind, a.caption, a.filename, a.mime, a.size, a.created_at, a.uploaded_by, a.lat, a.lng, a.accuracy, u.name AS uploaded_by_name
            FROM attachments a JOIN users u ON u.id = a.uploaded_by WHERE ${where} ORDER BY a.id`,
         )
         .all(...params),
@@ -179,7 +184,7 @@ function deliveryRoutes(db) {
     const warehouse = db.prepare('SELECT id, name FROM warehouses WHERE id = ?').get(warehouseId);
     const attachments = db
       .prepare(
-        `SELECT a.id, a.caption, a.filename, a.mime, a.size, a.created_at, a.uploaded_by, u.name AS uploaded_by_name
+        `SELECT a.id, a.caption, a.filename, a.mime, a.size, a.created_at, a.uploaded_by, a.lat, a.lng, a.accuracy, u.name AS uploaded_by_name
          FROM attachments a JOIN users u ON u.id = a.uploaded_by
          WHERE a.kind = 'receipt' AND a.reference = ? AND a.warehouse_id = ? ORDER BY a.id`,
       )

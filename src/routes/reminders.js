@@ -277,6 +277,28 @@ function buildReminders(db, user) {
     }
   }
 
+  // Activation reports in the last 7 days with no GPS location (phone location off or denied)
+  if (am || mgmt) {
+    const c = camp('c');
+    for (const row of db
+      .prepare(
+        `SELECT u.name AS promoter_name, COUNT(*) AS n FROM usage_reports ur
+         JOIN campaigns c ON c.id = ur.campaign_id JOIN users u ON u.id = ur.promoter_id
+         WHERE ur.lat IS NULL AND ur.report_date >= ? AND ${c.sql}
+         GROUP BY ur.promoter_id ORDER BY n DESC`,
+      )
+      .all(saToday(-7), ...c.params)) {
+      add({
+        group: 'missing',
+        severity: 'low',
+        type: 'no_location',
+        title: `${row.n} activation report(s) from ${row.promoter_name} have no location`,
+        detail: 'The phone’s location was off or not allowed, so the store visit can’t be confirmed.',
+        link: 'usage',
+      });
+    }
+  }
+
   // ---- stock health -------------------------------------------------------
   if (!promoter) {
     const cs = clientScope(user);

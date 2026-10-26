@@ -481,10 +481,12 @@
     return canvas.toDataURL('image/jpeg', 0.82);
   }
 
-  async function uploadFiles(target, files, caption) {
+  async function uploadFiles(target, files, caption, location) {
+    // Photos are geotagged with where they were uploaded from
+    const where = location === undefined ? await getLocation({ timeout: 6000 }) : location;
     for (const file of files) {
       const data = await fileToDataUrl(file);
-      await post('/attachments', { ...target, caption, filename: file.name, data });
+      await post('/attachments', { ...target, caption, filename: file.name, data, location: where || undefined });
     }
   }
 
@@ -530,7 +532,7 @@
                   { href: url, target: '_blank', rel: 'noopener' },
                   a.mime === 'application/pdf' ? h('div', { class: 'pdf' }, 'PDF') : h('img', { src: url, alt: a.caption || a.filename || 'Photo', loading: 'lazy' }),
                 ),
-                h('figcaption', null, a.caption || a.filename || '', h('div', { class: 'muted' }, `${a.uploaded_by_name}, ${fmtDateTime(a.created_at)}`)),
+                h('figcaption', null, a.caption || a.filename || '', h('div', { class: 'muted' }, `${a.uploaded_by_name}, ${fmtDateTime(a.created_at)}`), geoLink(a)),
                 canDelete && a.uploaded_by !== undefined
                   ? h('button', {
                       type: 'button',
@@ -569,6 +571,50 @@
 
   const qrImg = (text, size = 120) =>
     h('img', { src: `/api/qr.svg?text=${encodeURIComponent(text)}`, width: size, height: size, alt: text, class: 'qr' });
+
+  /** Phone GPS position {lat, lng, accuracy}, or null if unavailable or not allowed. Never throws. */
+  function getLocation({ timeout = 10000 } = {}) {
+    return new Promise((resolve) => {
+      if (!navigator.geolocation) return resolve(null);
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }),
+        () => resolve(null),
+        { enableHighAccuracy: true, timeout, maximumAge: 60000 },
+      );
+    });
+  }
+
+  /** Link to Google Maps for anything with lat/lng; null when there is no geotag. */
+  function geoLink(x, label) {
+    if (!x || x.lat === null || x.lat === undefined) return null;
+    return h(
+      'a',
+      { href: `https://www.google.com/maps?q=${x.lat},${x.lng}`, target: '_blank', rel: 'noopener', class: 'geo-link', title: `${Number(x.lat).toFixed(5)}, ${Number(x.lng).toFixed(5)}` },
+      label || `📍 Map${x.accuracy ? ` (±${Math.round(x.accuracy)} m)` : ''}`,
+    );
+  }
+
+  /** Geotag for a form: starts locating when the form opens and shows the result. value() resolves to the location or null. */
+  function locationTag() {
+    const el = h('div', { class: 'geo-status' });
+    let pending;
+    const run = () => {
+      el.className = 'geo-status';
+      el.textContent = '📍 Getting your location…';
+      pending = getLocation().then((loc) => {
+        if (loc) {
+          el.className = 'geo-status ok';
+          el.replaceChildren('📍 Location captured · ', geoLink(loc, `view on map (±${Math.round(loc.accuracy)} m)`));
+        } else {
+          el.className = 'geo-status warn';
+          el.replaceChildren('📍 Location not available. Allow location for this site in your browser, then ', h('button', { type: 'button', class: 'secondary small', onclick: run }, 'Try again'));
+        }
+        return loc;
+      });
+    };
+    run();
+    return { el, value: () => pending };
+  }
 
   const sizeOrder = (s) => {
     const i = ['XS', 'S', 'M', 'L', 'XL', 'XXL', '3XL'].indexOf(s);
@@ -1763,6 +1809,7 @@
       const courier = input({ placeholder: 'Courier (e.g. The Courier Guy)' });
       const waybill = input({ placeholder: q.delivery_method === 'courier' ? 'Waybill number (required)' : 'Waybill / reference' });
       const sig = collect ? signaturePad(`${q.promoter_name} signs to confirm they received this stock`) : null;
+      const where = locationTag();
       const dispatchBtn = h('button', { class: 'ok big' }, collect ? `Issue to ${q.promoter_name}` : 'Dispatch');
       dispatchBtn.onclick = () =>
         busy(dispatchBtn, async () => {
@@ -1772,7 +1819,7 @@
             courier: courier.value,
             waybill: waybill.value,
             items: [...dispatchInputs].map(([itemId, el]) => ({ id: itemId, qty_dispatched: el.value })),
-            handover: { signature, uniform_clean: clean.checked, uniform_ironed: ironed.checked },
+            handover: { signature, uniform_clean: clean.checked, uniform_ironed: ironed.checked, location: (await where.value()) || undefined },
           });
           toast(collect ? `${q.ref} issued to ${q.promoter_name}` : `${q.ref} dispatched`, 'ok');
           reload();
@@ -1789,6 +1836,7 @@
             : null,
           collect ? null : h('div', { class: 'form-grid', style: 'margin-bottom:12px' }, q.delivery_method === 'courier' ? field('Courier', courier) : null, field('Waybill / reference', waybill)),
           sig ? sig.el : null,
+          where.el,
           h('div', { style: 'margin-top:12px' }, dispatchBtn),
         ),
       );
@@ -1864,6 +1912,7 @@
   /** Promoter confirms a courier/vehicle delivery: sign, optionally snap the waybill. */
   function confirmDelivery(q, done) {
     const sig = signaturePad('Your signature');
+    const where = locationTag();
     const files = [];
     const fileNote = h('div', { class: 'hint' });
     const picker = filePicker((chosen) => {
@@ -1873,15 +1922,16 @@
     const save = h('button', { class: 'ok' }, 'Confirm delivery');
     const m = modal(
       `Confirm ${q.ref}`,
-      h('div', null, h('p', { class: 'muted', style: 'margin-top:0' }, 'Check the boxes and quantities, then sign. Add a photo of the waybill if you have one.'), sig.el, h('div', { style: 'margin-top:12px' }, picker, fileNote)),
+      h('div', null, h('p', { class: 'muted', style: 'margin-top:0' }, 'Check the boxes and quantities, then sign. Add a photo of the waybill if you have one.'), sig.el, where.el, h('div', { style: 'margin-top:12px' }, picker, fileNote)),
       [save],
     );
     save.onclick = () =>
       busy(save, async () => {
         const signature = sig.value();
         if (!signature) throw new Error('Please sign to confirm');
-        if (files.length) await uploadFiles({ kind: 'request', request_id: q.id }, files, 'Waybill on delivery');
-        await post(`/requests/${q.id}/deliver`, { signature });
+        const location = await where.value();
+        if (files.length) await uploadFiles({ kind: 'request', request_id: q.id }, files, 'Waybill on delivery', location);
+        await post(`/requests/${q.id}/deliver`, { signature, location: location || undefined });
         m.close();
         toast('Delivery confirmed. Thank you!', 'ok');
         state.lastDashboard = null;
@@ -2035,6 +2085,7 @@
     const anyUniform = rt.items.some((x) => x.category === 'Uniform');
     const numIn = (v) => input({ type: 'number', min: '0', value: v, style: 'width:80px', inputmode: 'numeric' });
     const sig = receiving ? signaturePad('Promoter signature (if they are here)') : null;
+    const where = receiving ? locationTag() : null;
     const body = h(
       'div',
       null,
@@ -2072,6 +2123,7 @@
       ),
       receiving ? h('p', { class: 'hint' }, 'Good units go back into stock. Uniforms that aren’t clean and ironed go to the laundry. Damaged units are written off. Anything not counted stays against the promoter.') : null,
       sig ? sig.el : null,
+      where ? where.el : null,
       handoverCards(rt.handovers),
       h('div', { style: 'margin-top:14px' }, attachmentsPanel({ kind: 'return', return_id: rt.id }, rt.attachments, { canUpload: isOps() || role() === 'promoter', title: 'Photos', emptyText: 'No photos' })),
     );
@@ -2082,7 +2134,7 @@
         busy(recv, async () => {
           await post(`/returns/${rt.id}/receive`, {
             items: [...inputs].map(([itemId, i]) => ({ id: itemId, qty_good: i.good.value, qty_laundry: i.laundry.value, qty_damaged: i.bad.value })),
-            handover: { signature: sig.value() },
+            handover: { signature: sig.value(), location: (await where.value()) || undefined },
           });
           m.close();
           toast(`${rt.ref} checked in`, 'ok');
@@ -2200,6 +2252,7 @@
             { label: 'Campaign', render: (x) => h('div', null, x.campaign_name, h('div', { class: 'small muted' }, x.client_name)) },
             role() === 'promoter' ? null : { label: 'Promoter', key: 'promoter_name' },
             { label: 'Store / venue', render: (x) => x.store || '—' },
+            { label: 'Location', render: (x) => geoLink(x, `📍 Map${x.accuracy ? ` ±${Math.round(x.accuracy)} m` : ''}`) || badge('pending', 'No location'), class: 'nowrap' },
             { label: 'Items', render: (x) => h('div', { class: 'small' }, x.items.map((i) => h('div', null, `${num(i.qty_used)} × ${i.product_name}`, i.qty_damaged ? h('span', { class: 'muted' }, ` (+${i.qty_damaged} damaged)`) : null))) },
             { label: 'Units', num: true, render: (x) => num(x.units_used) },
           ].filter(Boolean),
@@ -2246,10 +2299,12 @@
     const date = input({ type: 'date', value: today(), max: today() });
     const store = input({ placeholder: 'e.g. Pick n Pay Rosebank' });
     const notes = h('textarea', { placeholder: 'Foot traffic, feedback, stock issues…' });
+    // Geotag only when the promoter logs it themselves at the store; office entries would show the office
+    const where = role() === 'promoter' ? locationTag() : null;
     const save = h('button', null, 'Submit report');
     const m = modal(
       'Log activation',
-      h('div', null, h('div', { class: 'form-grid' }, picker.fields, field('Date', date), field('Store / venue', store)), h('div', { style: 'margin-top:14px' }, linesWrap), h('div', { style: 'margin-top:12px' }, field('Notes', notes))),
+      h('div', null, h('div', { class: 'form-grid' }, picker.fields, field('Date', date), field('Store / venue', store)), where ? where.el : null, h('div', { style: 'margin-top:14px' }, linesWrap), h('div', { style: 'margin-top:12px' }, field('Notes', notes))),
       [save],
     );
     save.onclick = () =>
@@ -2257,7 +2312,8 @@
         const items = [...inputs]
           .map(([product_id, i]) => ({ product_id, qty_used: Number(i.used.value || 0), qty_damaged: Number(i.dmg.value || 0) }))
           .filter((i) => i.qty_used || i.qty_damaged);
-        await post('/usage', { campaign_id: picker.campaignId(), promoter_id: picker.promoterId(), report_date: date.value, store: store.value, notes: notes.value, items });
+        const location = where ? await where.value() : null;
+        await post('/usage', { campaign_id: picker.campaignId(), promoter_id: picker.promoterId(), report_date: date.value, store: store.value, notes: notes.value, items, location: location || undefined });
         m.close();
         toast('Activation report saved', 'ok');
         state.lastDashboard = null;
@@ -2683,6 +2739,7 @@
           ),
           h('div', { class: 'small' }, h('strong', null, HANDOVER_NAMES[hd.kind]), ` · ${fmtDateTime(hd.created_at)}`, hd.uniform_clean !== null ? [' · Uniforms: ', uniformCheck(hd)] : null),
           hd.note ? h('div', { class: 'small muted' }, hd.note) : null,
+          hd.lat !== null && hd.lat !== undefined ? h('div', { class: 'small' }, geoLink(hd, `📍 Where: view on map (±${Math.round(hd.accuracy || 0)} m)`)) : null,
           hd.signed ? h('img', { class: 'signature', src: `/api/handovers/${hd.id}/signature.png`, alt: `Signature of ${hd.promoter_name}` }) : h('div', { class: 'small muted' }, 'Not signed'),
         ),
       ),
@@ -2711,6 +2768,7 @@
             { label: 'Warehouse', render: (x) => x.warehouse_name || '—' },
             { label: 'Uniforms', render: uniformCheck },
             { label: 'Signed', render: (x) => (x.signed ? '✓' : '—') },
+            { label: 'Where', render: (x) => geoLink(x, '📍 Map') || h('span', { class: 'muted' }, '—') },
           ],
           rows,
           {
@@ -2857,6 +2915,7 @@
     campSel.addEventListener('change', draw);
     draw();
     const sig = signaturePad('Promoter signs to confirm what they returned');
+    const where = locationTag();
     const note = input({ placeholder: 'Note (optional)' });
     const save = h('button', { class: 'ok' }, 'Check in return');
     const m = modal(
@@ -2869,6 +2928,7 @@
         h('div', { style: 'margin-top:12px' }, rowsWrap),
         h('p', { class: 'hint' }, 'Uniforms that are not clean and ironed go to the laundry and can’t be issued until they’re done.'),
         sig.el,
+        where.el,
         h('div', { style: 'margin-top:10px' }, note),
       ),
       [save],
@@ -2891,7 +2951,7 @@
           warehouse_id: whSel.value,
           receive_now: true,
           items,
-          handover: { signature: sig.value(), note: note.value },
+          handover: { signature: sig.value(), note: note.value, location: (await where.value()) || undefined },
         });
         m.close();
         toast(`${res.ref} checked in`, 'ok');

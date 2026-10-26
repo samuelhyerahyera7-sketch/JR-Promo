@@ -312,6 +312,18 @@ const MIGRATIONS = [
   CREATE INDEX idx_movements_created ON movements(created_at);
   CREATE INDEX idx_movements_reference ON movements(reference);
   `,
+  // v3: geotags (phone GPS position) on activation reports, handovers and photos
+  `
+  ALTER TABLE usage_reports ADD COLUMN lat REAL;
+  ALTER TABLE usage_reports ADD COLUMN lng REAL;
+  ALTER TABLE usage_reports ADD COLUMN accuracy REAL;
+  ALTER TABLE handovers ADD COLUMN lat REAL;
+  ALTER TABLE handovers ADD COLUMN lng REAL;
+  ALTER TABLE handovers ADD COLUMN accuracy REAL;
+  ALTER TABLE attachments ADD COLUMN lat REAL;
+  ALTER TABLE attachments ADD COLUMN lng REAL;
+  ALTER TABLE attachments ADD COLUMN accuracy REAL;
+  `,
 ];
 
 function migrate(db) {

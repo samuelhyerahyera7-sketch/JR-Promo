@@ -63,6 +63,11 @@ Worked out live and cleared automatically once dealt with:
 - Promoters can photograph the courier waybill when confirming a delivery; warehouse staff can add photos to returns (e.g. damage).
 - Photos are shrunk on the phone before upload and stored in the database, so one backup file covers everything.
 
+### Geotags
+- The phone's GPS position is recorded on **activation reports** (proving the promoter was at the store), **handovers** (counter collections, delivery confirmations, returns) and **waybill/delivery photos**. Each shows a 📍 link that opens the spot in Google Maps.
+- Forms show whether the location was captured. If the phone's location is off or not allowed, the action still goes through, but the activation report is marked *No location* and the account manager gets a reminder.
+- Activation reports are only geotagged when promoters log them on their own phone, so office entries don't show the office's location.
+
 ### Everything else
 
 - Dashboards for each role: stock value, low-stock alerts, approval and dispatch queues, a 30-day stock flow chart, and stock by warehouse and by client
@@ -117,7 +122,7 @@ Then sign in and set up, in this order: **Warehouses → Staff & users → Clien
 
 - The database is a single file. Host on something with a **persistent disk** (a small VPS, Railway or Render with a volume, an office server). Serverless platforms with ephemeral filesystems will lose data.
 - Back up by copying `data/jr-promo.db` (for example with `sqlite3 data/jr-promo.db ".backup backup.db"`) on a schedule.
-- Put it behind HTTPS (for example Caddy or nginx) before staff use it over the internet. **Phone camera scanning only works over HTTPS** (or on `localhost`); handheld scanners and typing codes work either way.
+- Put it behind HTTPS (for example Caddy or nginx) before staff use it over the internet. **Phone camera scanning and geotags only work over HTTPS** (or on `localhost`); handheld scanners and typing codes work either way.
 
 ## Development
 

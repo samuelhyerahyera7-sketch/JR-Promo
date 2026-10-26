@@ -461,6 +461,45 @@ test('older databases are upgraded in place', () => {
   upgraded.close();
 });
 
+test('geotags are stored on activation reports, handovers and photos', async () => {
+  const campaign = id("SELECT id FROM campaigns WHERE name = 'Sunfresh Summer Tastings'");
+  const cups = id("SELECT id FROM products WHERE sku = 'SFJ-CUP-50'");
+  const sandton = { lat: -26.1086, lng: 28.0527, accuracy: 11.6 };
+
+  const bad = await call('nomsa', 'POST', '/usage', { campaign_id: campaign, items: [{ product_id: cups, qty_used: 1 }], location: { lat: -126, lng: 28 } });
+  assert.equal(bad.status, 400);
+
+  const rep = await call('nomsa', 'POST', '/usage', { campaign_id: campaign, store: 'Sandton City', items: [{ product_id: cups, qty_used: 1 }], location: sandton });
+  assert.equal(rep.status, 201, JSON.stringify(rep.data));
+  const saved = (await call('lerato', 'GET', '/usage')).data.find((u) => u.id === rep.data.id);
+  assert.equal(saved.lat, sandton.lat);
+  assert.equal(saved.lng, sandton.lng);
+  assert.equal(saved.accuracy, 12, 'accuracy rounded to whole metres');
+
+  // A report without a location is accepted but flagged to the account manager
+  await call('nomsa', 'POST', '/usage', { campaign_id: campaign, items: [{ product_id: cups, qty_used: 1 }] });
+  const reminders = (await call('lerato', 'GET', '/reminders')).data;
+  assert.ok(reminders.some((r) => r.type === 'no_location' && r.title.includes('Nomsa')));
+
+  // Counter collection: handover keeps where it happened
+  const kagiso = id("SELECT id FROM users WHERE email = 'kagiso@jrpromo.test'");
+  const jhb = id("SELECT id FROM warehouses WHERE name = 'JHB Main'");
+  const req = await call('lerato', 'POST', '/requests', { campaign_id: campaign, promoter_id: kagiso, warehouse_id: jhb, items: [{ product_id: cups, qty: 1 }] });
+  const midrand = { lat: -25.9992, lng: 28.1263, accuracy: 20 };
+  const issued = await call('warehouse', 'POST', `/requests/${req.data.id}/dispatch`, { handover: { signature: SIG, location: midrand } });
+  assert.equal(issued.status, 200, JSON.stringify(issued.data));
+  assert.equal(issued.data.handovers[0].lat, midrand.lat);
+  const log = (await call('director', 'GET', '/handovers')).data.find((h) => h.request_id === req.data.id);
+  assert.equal(log.lng, midrand.lng);
+
+  // Photos keep the upload location
+  const jpeg = `data:image/jpeg;base64,${Buffer.from('geo-photo').toString('base64')}`;
+  const up = await call('warehouse', 'POST', '/attachments', { kind: 'receipt', reference: 'GRN-24102', warehouse_id: jhb, data: jpeg, location: midrand });
+  assert.equal(up.status, 201);
+  const files = (await call('warehouse', 'GET', `/attachments?kind=receipt&reference=GRN-24102&warehouse_id=${jhb}`)).data;
+  assert.equal(files[0].lat, midrand.lat);
+});
+
 // Runs last so it checks the ledger after every other test has moved stock
 test('ledger reconciles with stock tables for every product', () => {
   const rows = db

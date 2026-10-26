@@ -74,7 +74,7 @@ function recordHandover(db, h) {
   return db
     .prepare(
       `INSERT INTO handovers (kind, request_id, return_id, promoter_id, staff_id, warehouse_id, signature,
-         uniform_clean, uniform_ironed, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         uniform_clean, uniform_ironed, note, lat, lng, accuracy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       h.kind,
@@ -87,12 +87,16 @@ function recordHandover(db, h) {
       h.uniformClean === undefined || h.uniformClean === null ? null : h.uniformClean ? 1 : 0,
       h.uniformIroned === undefined || h.uniformIroned === null ? null : h.uniformIroned ? 1 : 0,
       h.note ?? null,
+      h.location ? h.location.lat : null,
+      h.location ? h.location.lng : null,
+      h.location ? h.location.accuracy : null,
     ).lastInsertRowid;
 }
 
 const HANDOVER_SELECT = `
   SELECT h.id, h.kind, h.request_id, h.return_id, h.promoter_id, h.staff_id, h.warehouse_id,
          h.uniform_clean, h.uniform_ironed, h.note, h.created_at, (h.signature IS NOT NULL) AS signed,
+         h.lat, h.lng, h.accuracy,
          pr.name AS promoter_name, pr.phone AS promoter_phone, st.name AS staff_name, st.role AS staff_role,
          w.name AS warehouse_name, rq.ref AS request_ref, rt.ref AS return_ref
   FROM handovers h
@@ -105,7 +109,8 @@ const HANDOVER_SELECT = `
 function attachmentsFor(db, column, id) {
   return db
     .prepare(
-      `SELECT a.id, a.caption, a.filename, a.mime, a.size, a.created_at, a.uploaded_by, u.name AS uploaded_by_name
+      `SELECT a.id, a.caption, a.filename, a.mime, a.size, a.created_at, a.uploaded_by, a.lat, a.lng, a.accuracy,
+         u.name AS uploaded_by_name
        FROM attachments a JOIN users u ON u.id = a.uploaded_by WHERE a.${column} = ? ORDER BY a.id`,
     )
     .all(id);
@@ -359,6 +364,7 @@ function requestRoutes(db) {
         uniformClean: uniforms ? true : null,
         uniformIroned: uniforms ? true : null,
         note: v.str(handover.note, 'Note'),
+        location: v.geo(handover.location),
       });
     });
     res.json(loadRequest(db, req.user, request.id));
@@ -382,6 +388,7 @@ function requestRoutes(db) {
         staffId: isOwner ? null : req.user.id,
         signature: sig,
         note: v.str(req.body.note, 'Note'),
+        location: v.geo(req.body.location),
       });
     });
     res.json(loadRequest(db, req.user, request.id));
@@ -485,6 +492,7 @@ function receiveReturn(db, user, ret, countsInput, handover = {}) {
     uniformClean: uniformLines ? needsLaundry === 0 : null,
     uniformIroned: uniformLines ? needsLaundry === 0 : null,
     note: v.str(handover.note, 'Note'),
+    location: v.geo(handover.location),
   });
 }
 
@@ -711,10 +719,13 @@ function usageRoutes(db) {
     }));
     if (lines.every((l) => l.used + l.damaged === 0)) throw new HttpError(400, 'Enter at least one unit used or damaged');
     const reportDate = v.date(b.report_date, 'Date') || new Date().toISOString().slice(0, 10);
+    const location = v.geo(b.location);
     const id = tx(db, () => {
       const info = db
-        .prepare('INSERT INTO usage_reports (campaign_id, promoter_id, report_date, store, notes) VALUES (?, ?, ?, ?, ?)')
-        .run(campaign.id, promoterId, reportDate, v.str(b.store, 'Store'), v.str(b.notes, 'Notes', { max: 2000 }));
+        .prepare(
+          'INSERT INTO usage_reports (campaign_id, promoter_id, report_date, store, notes, lat, lng, accuracy) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        )
+        .run(campaign.id, promoterId, reportDate, v.str(b.store, 'Store'), v.str(b.notes, 'Notes', { max: 2000 }), location.lat, location.lng, location.accuracy);
       const ref = `USE-${String(info.lastInsertRowid).padStart(5, '0')}`;
       const ins = db.prepare('INSERT INTO usage_items (report_id, product_id, qty_used, qty_damaged) VALUES (?, ?, ?, ?)');
       for (const l of lines) {

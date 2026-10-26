@@ -5,6 +5,7 @@ const { MANAGEMENT, HttpError, allow } = require('../auth');
 const v = require('../validate');
 const { tx } = require('../db');
 const { assertCampaign, campaignScope } = require('../access');
+const stock = require('../stock');
 
 const STATUSES = ['planned', 'active', 'completed', 'cancelled'];
 
@@ -48,11 +49,12 @@ function campaignRoutes(db) {
       .get(id);
     campaign.promoters = db
       .prepare(
-        `SELECT u.id, u.name, u.phone, u.region FROM campaign_promoters cp JOIN users u ON u.id = cp.promoter_id
+        `SELECT u.id, u.name, u.phone, u.region, u.gender, u.uniform_size FROM campaign_promoters cp JOIN users u ON u.id = cp.promoter_id
          WHERE cp.campaign_id = ? ORDER BY u.name`,
       )
       .all(id);
     campaign.summary = campaignSummary(db, id, req.user);
+    campaign.plan = req.user.role === 'promoter' ? [] : campaignPlan(db, id);
     res.json(campaign);
   });
 
@@ -60,18 +62,26 @@ function campaignRoutes(db) {
   r.get('/:id/products', (req, res) => {
     const id = v.int(req.params.id, 'id', { required: true });
     const campaign = assertCampaign(db, req.user, id);
-    const products = db
-      .prepare('SELECT id, sku, name, category, unit FROM products WHERE client_id = ? AND active = 1 ORDER BY name')
-      .all(campaign.client_id);
-    const avail = db.prepare(
-      `SELECT w.id AS warehouse_id, w.name AS warehouse_name,
-         COALESCE(s.qty, 0) - COALESCE((SELECT SUM(ri.qty_approved) FROM request_items ri JOIN requests r ON r.id = ri.request_id
-           WHERE ri.product_id = ? AND r.warehouse_id = w.id AND r.status IN ('approved','picking')), 0) AS available
-       FROM warehouses w LEFT JOIN stock s ON s.warehouse_id = w.id AND s.product_id = ?
-       WHERE w.active = 1 ORDER BY w.name`,
-    );
-    for (const p of products) p.availability = avail.all(p.id, p.id).map((a) => ({ ...a, available: Math.max(a.available, 0) }));
-    res.json(products);
+    res.json(campaignProducts(db, campaign));
+  });
+
+  // Planned stock for the campaign vs what has been approved and sent
+  r.put('/:id/plan', allow(MANAGEMENT, 'account_manager'), (req, res) => {
+    const id = v.int(req.params.id, 'id', { required: true });
+    const campaign = assertCampaign(db, req.user, id, { manage: true });
+    const allowed = new Set(campaignProducts(db, campaign).map((p) => p.id));
+    const lines = Array.isArray(req.body.items) ? req.body.items : [];
+    tx(db, () => {
+      db.prepare('DELETE FROM campaign_plan WHERE campaign_id = ?').run(id);
+      const ins = db.prepare('INSERT INTO campaign_plan (campaign_id, product_id, planned_qty) VALUES (?, ?, ?)');
+      for (const l of lines) {
+        const productId = v.int(l.product_id, 'Product', { required: true });
+        const qty = v.int(l.planned_qty, 'Planned quantity', { required: true, min: 0 });
+        if (!allowed.has(productId)) throw new HttpError(400, `Product #${productId} can't be used on this campaign`);
+        if (qty > 0) ins.run(id, productId, qty);
+      }
+    });
+    res.json(campaignPlan(db, id));
   });
 
   const fields = (b, user) => {
@@ -149,7 +159,7 @@ function campaignSummary(db, campaignId, user) {
          COALESCE(SUM(CASE WHEN m.type = 'dispatch' THEN m.qty END), 0) AS dispatched,
          COALESCE(SUM(CASE WHEN m.type = 'usage' THEN m.qty END), 0) AS used,
          COALESCE(SUM(CASE WHEN m.type = 'damage' THEN m.qty END), 0) AS damaged,
-         COALESCE(SUM(CASE WHEN m.type = 'return' THEN m.qty END), 0) AS returned,
+         COALESCE(SUM(CASE WHEN m.type IN ('return','laundry') THEN m.qty END), 0) AS returned,
          COALESCE((SELECT SUM(f.qty) FROM field_stock f WHERE f.campaign_id = ? AND f.product_id = p.id
                    ${user.role === 'promoter' ? 'AND f.promoter_id = ?' : ''}), 0) AS in_field
        FROM movements m JOIN products p ON p.id = m.product_id
@@ -165,4 +175,48 @@ function campaignSummary(db, campaignId, user) {
   return rows;
 }
 
-module.exports = { campaignRoutes, campaignSummary };
+/** Products a campaign may use: the client's own plus company (house) stock, with free stock per warehouse. */
+function campaignProducts(db, campaign) {
+  const products = db
+    .prepare(
+      `SELECT p.id, p.sku, p.name, p.category, p.unit, p.gender, p.size, p.colour, p.style, cl.is_house
+       FROM products p JOIN clients cl ON cl.id = p.client_id
+       WHERE (p.client_id = ? OR cl.is_house = 1) AND p.active = 1
+       ORDER BY cl.is_house, p.category, p.name`,
+    )
+    .all(campaign.client_id);
+  const avail = db.prepare(
+    `SELECT w.id AS warehouse_id, w.name AS warehouse_name,
+       COALESCE(s.qty, 0)
+       - COALESCE((SELECT SUM(ri.qty_approved) FROM request_items ri JOIN requests r ON r.id = ri.request_id
+           WHERE ri.product_id = ?1 AND r.warehouse_id = w.id AND r.status IN ('approved','picking')), 0)
+       - COALESCE((SELECT SUM(b.qty) FROM stock_batches b WHERE b.product_id = ?1 AND b.warehouse_id = w.id
+           AND b.expiry_date < ?2), 0) AS available
+     FROM warehouses w LEFT JOIN stock s ON s.warehouse_id = w.id AND s.product_id = ?1
+     WHERE w.active = 1 ORDER BY w.name`,
+  );
+  const today = stock.saToday();
+  for (const p of products) p.availability = avail.all(p.id, today).map((a) => ({ ...a, available: Math.max(a.available, 0) }));
+  return products;
+}
+
+function campaignPlan(db, campaignId) {
+  return db
+    .prepare(
+      `SELECT cp.product_id, cp.planned_qty, p.sku, p.name AS product_name, p.category,
+         COALESCE((SELECT SUM(m.qty) FROM movements m WHERE m.type = 'dispatch' AND m.campaign_id = cp.campaign_id
+                   AND m.product_id = cp.product_id), 0) AS dispatched,
+         COALESCE((SELECT SUM(ri.qty_approved) FROM request_items ri JOIN requests r ON r.id = ri.request_id
+                   WHERE r.campaign_id = cp.campaign_id AND ri.product_id = cp.product_id
+                   AND r.status IN ('approved','picking')), 0) AS approved,
+         COALESCE((SELECT SUM(ri.qty_requested) FROM request_items ri JOIN requests r ON r.id = ri.request_id
+                   WHERE r.campaign_id = cp.campaign_id AND ri.product_id = cp.product_id AND r.status = 'pending'), 0) AS requested,
+         COALESCE((SELECT SUM(qty) FROM stock s WHERE s.product_id = cp.product_id), 0) AS on_hand
+       FROM campaign_plan cp JOIN products p ON p.id = cp.product_id
+       WHERE cp.campaign_id = ? ORDER BY p.category, p.name`,
+    )
+    .all(campaignId)
+    .map((row) => ({ ...row, outstanding: Math.max(row.planned_qty - row.dispatched - row.approved, 0) }));
+}
+
+module.exports = { campaignRoutes, campaignSummary, campaignProducts, campaignPlan };

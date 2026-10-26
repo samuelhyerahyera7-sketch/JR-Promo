@@ -1,11 +1,14 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const express = require('express');
 const { ROLES, MANAGEMENT, HttpError, hashPassword, verifyPassword, createSession, allow, isManagement } = require('../auth');
 const v = require('../validate');
 const { clientScope } = require('../access');
 
-const USER_COLUMNS = 'u.id, u.name, u.email, u.phone, u.role, u.region, u.warehouse_id, u.active, u.created_at';
+const USER_COLUMNS =
+  'u.id, u.name, u.email, u.phone, u.role, u.region, u.warehouse_id, u.gender, u.uniform_size, u.badge_code, u.active, u.created_at';
+const newBadge = () => crypto.randomBytes(10).toString('hex');
 
 function authRoutes(db) {
   const r = express.Router();
@@ -73,6 +76,7 @@ function userRoutes(db) {
          WHERE ${where.join(' AND ')} ORDER BY u.active DESC, u.role, u.name`,
       )
       .all(...params);
+    if (req.user.role === 'account_manager') for (const row of rows) delete row.badge_code;
     res.json(rows);
   });
 
@@ -84,7 +88,8 @@ function userRoutes(db) {
     if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) throw new HttpError(409, 'That email is already in use');
     const info = db
       .prepare(
-        'INSERT INTO users (name, email, phone, role, region, warehouse_id, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        `INSERT INTO users (name, email, phone, role, region, warehouse_id, gender, uniform_size, badge_code, password_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         v.str(b.name, 'Name', { required: true }),
@@ -93,6 +98,9 @@ function userRoutes(db) {
         v.oneOf(b.role, 'Role', ROLES, { required: true }),
         v.str(b.region, 'Region'),
         v.int(b.warehouse_id, 'Warehouse'),
+        v.oneOf(b.gender, 'Gender', ['female', 'male']),
+        v.str(b.uniform_size, 'Uniform size', { max: 10 }),
+        newBadge(),
         hashPassword(password),
       );
     res.status(201).json(getUser(db, info.lastInsertRowid));
@@ -109,6 +117,8 @@ function userRoutes(db) {
       role: b.role !== undefined ? v.oneOf(b.role, 'Role', ROLES, { required: true }) : user.role,
       region: b.region !== undefined ? v.str(b.region, 'Region') : user.region,
       warehouse_id: b.warehouse_id !== undefined ? v.int(b.warehouse_id, 'Warehouse') : user.warehouse_id,
+      gender: b.gender !== undefined ? v.oneOf(b.gender, 'Gender', ['female', 'male']) : user.gender,
+      uniform_size: b.uniform_size !== undefined ? v.str(b.uniform_size, 'Uniform size', { max: 10 }) : user.uniform_size,
       active: b.active !== undefined ? (b.active ? 1 : 0) : user.active,
     };
     if (id === req.user.id && (fields.active === 0 || fields.role !== 'director')) {
@@ -117,13 +127,32 @@ function userRoutes(db) {
     const clash = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').get(fields.email, id);
     if (clash) throw new HttpError(409, 'That email is already in use');
     db.prepare(
-      'UPDATE users SET name=?, email=?, phone=?, role=?, region=?, warehouse_id=?, active=? WHERE id=?',
-    ).run(fields.name, fields.email, fields.phone, fields.role, fields.region, fields.warehouse_id, fields.active, id);
+      'UPDATE users SET name=?, email=?, phone=?, role=?, region=?, warehouse_id=?, gender=?, uniform_size=?, active=? WHERE id=?',
+    ).run(
+      fields.name,
+      fields.email,
+      fields.phone,
+      fields.role,
+      fields.region,
+      fields.warehouse_id,
+      fields.gender,
+      fields.uniform_size,
+      fields.active,
+      id,
+    );
     if (b.password) {
       if (String(b.password).length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
       db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(String(b.password)), id);
     }
     if (!fields.active || b.password) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
+    res.json(getUser(db, id));
+  });
+
+  // Lost or shared badge: issue a new QR code so the old one stops working
+  r.post('/:id/badge', allow(MANAGEMENT), (req, res) => {
+    const id = v.int(req.params.id, 'id', { required: true });
+    v.found(getUser(db, id), 'User');
+    db.prepare('UPDATE users SET badge_code = ? WHERE id = ?').run(newBadge(), id);
     res.json(getUser(db, id));
   });
 
@@ -190,7 +219,7 @@ function clientRoutes(db) {
              COALESCE((SELECT SUM(s.qty * p.unit_cost) FROM stock s JOIN products p ON p.id = s.product_id
                        WHERE p.client_id = cl.id), 0) AS stock_value
            FROM clients cl LEFT JOIN users u ON u.id = cl.account_manager_id
-           WHERE ${scope.sql} ORDER BY cl.active DESC, cl.name`,
+           WHERE ${scope.sql} ORDER BY cl.is_house DESC, cl.active DESC, cl.name`,
         )
         .all(...scope.params),
     );
@@ -209,6 +238,7 @@ function clientRoutes(db) {
       v.str(b.contact_phone, 'Contact phone'),
       amId,
       b.active === undefined ? 1 : b.active ? 1 : 0,
+      b.is_house ? 1 : 0,
     ];
   };
 
@@ -217,7 +247,8 @@ function clientRoutes(db) {
     if (db.prepare('SELECT 1 FROM clients WHERE name = ?').get(f[0])) throw new HttpError(409, 'A client with that name exists');
     const info = db
       .prepare(
-        'INSERT INTO clients (name, contact_name, contact_email, contact_phone, account_manager_id, active) VALUES (?, ?, ?, ?, ?, ?)',
+        `INSERT INTO clients (name, contact_name, contact_email, contact_phone, account_manager_id, active, is_house)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(...f);
     res.status(201).json(db.prepare('SELECT * FROM clients WHERE id = ?').get(info.lastInsertRowid));
@@ -227,7 +258,7 @@ function clientRoutes(db) {
     const id = v.int(req.params.id, 'id', { required: true });
     v.found(db.prepare('SELECT 1 FROM clients WHERE id = ?').get(id), 'Client');
     db.prepare(
-      'UPDATE clients SET name=?, contact_name=?, contact_email=?, contact_phone=?, account_manager_id=?, active=? WHERE id=?',
+      'UPDATE clients SET name=?, contact_name=?, contact_email=?, contact_phone=?, account_manager_id=?, active=?, is_house=? WHERE id=?',
     ).run(...fields(req.body), id);
     res.json(db.prepare('SELECT * FROM clients WHERE id = ?').get(id));
   });

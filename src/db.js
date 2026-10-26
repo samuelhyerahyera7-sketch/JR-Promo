@@ -191,12 +191,151 @@ CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
 CREATE INDEX IF NOT EXISTS idx_products_client ON products(client_id);
 `;
 
+// Schema changes after the first release. Each entry upgrades the database by one version.
+const MIGRATIONS = [
+  // v2: uniforms, house stock, expiry batches, laundry, kits, campaign plans, handovers, attachments
+  `
+  ALTER TABLE products ADD COLUMN gender TEXT;
+  ALTER TABLE products ADD COLUMN size TEXT;
+  ALTER TABLE products ADD COLUMN colour TEXT;
+  ALTER TABLE products ADD COLUMN style TEXT;
+  ALTER TABLE products ADD COLUMN tracks_expiry INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE clients ADD COLUMN is_house INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE users ADD COLUMN badge_code TEXT;
+  ALTER TABLE users ADD COLUMN gender TEXT;
+  ALTER TABLE users ADD COLUMN uniform_size TEXT;
+  UPDATE users SET badge_code = lower(hex(randomblob(10))) WHERE badge_code IS NULL;
+  CREATE UNIQUE INDEX idx_users_badge ON users(badge_code);
+  ALTER TABLE return_items ADD COLUMN qty_laundry INTEGER;
+
+  -- Expiry-tracked stock is held in batches; their total always equals stock.qty
+  CREATE TABLE stock_batches (
+    id INTEGER PRIMARY KEY,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    warehouse_id INTEGER NOT NULL REFERENCES warehouses(id),
+    batch_no TEXT NOT NULL,
+    expiry_date TEXT,
+    qty INTEGER NOT NULL DEFAULT 0 CHECK (qty >= 0),
+    UNIQUE (product_id, warehouse_id, batch_no)
+  );
+
+  -- Returned uniforms waiting to be washed and ironed before they can be issued again
+  CREATE TABLE laundry_stock (
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    warehouse_id INTEGER NOT NULL REFERENCES warehouses(id),
+    qty INTEGER NOT NULL DEFAULT 0 CHECK (qty >= 0),
+    PRIMARY KEY (product_id, warehouse_id)
+  );
+
+  -- Ready-made sets, e.g. a tasting table setup
+  CREATE TABLE kits (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    active INTEGER NOT NULL DEFAULT 1
+  );
+  CREATE TABLE kit_items (
+    kit_id INTEGER NOT NULL REFERENCES kits(id) ON DELETE CASCADE,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    qty INTEGER NOT NULL CHECK (qty > 0),
+    PRIMARY KEY (kit_id, product_id)
+  );
+
+  -- Stock a campaign is planned to need
+  CREATE TABLE campaign_plan (
+    campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    planned_qty INTEGER NOT NULL CHECK (planned_qty >= 0),
+    PRIMARY KEY (campaign_id, product_id)
+  );
+
+  -- Who handed what to whom: warehouse staff member, promoter, signature, uniform check
+  CREATE TABLE handovers (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('collection','dispatch','delivery','return')),
+    request_id INTEGER REFERENCES requests(id),
+    return_id INTEGER REFERENCES returns(id),
+    promoter_id INTEGER NOT NULL REFERENCES users(id),
+    staff_id INTEGER REFERENCES users(id),
+    warehouse_id INTEGER REFERENCES warehouses(id),
+    signature TEXT,
+    uniform_clean INTEGER,
+    uniform_ironed INTEGER,
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX idx_handovers_promoter ON handovers(promoter_id);
+
+  -- Photos (waybills, delivery notes, damage) attached to deliveries, requests and returns
+  CREATE TABLE attachments (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('receipt','request','return')),
+    reference TEXT,
+    warehouse_id INTEGER REFERENCES warehouses(id),
+    request_id INTEGER REFERENCES requests(id),
+    return_id INTEGER REFERENCES returns(id),
+    caption TEXT,
+    filename TEXT,
+    mime TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    data BLOB NOT NULL,
+    uploaded_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX idx_attachments_ref ON attachments(kind, reference);
+
+  -- Rebuild the ledger to allow the new movement types and record batches
+  CREATE TABLE movements_v2 (
+    id INTEGER PRIMARY KEY,
+    type TEXT NOT NULL CHECK (type IN ('receipt','dispatch','transfer','adjustment','return','usage','damage',
+                                       'laundry','laundered','write_off')),
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    qty INTEGER NOT NULL,
+    from_warehouse_id INTEGER REFERENCES warehouses(id),
+    to_warehouse_id INTEGER REFERENCES warehouses(id),
+    promoter_id INTEGER REFERENCES users(id),
+    campaign_id INTEGER REFERENCES campaigns(id),
+    batch_no TEXT,
+    expiry_date TEXT,
+    reference TEXT,
+    note TEXT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  INSERT INTO movements_v2 (id, type, product_id, qty, from_warehouse_id, to_warehouse_id, promoter_id, campaign_id,
+                            reference, note, user_id, created_at)
+    SELECT id, type, product_id, qty, from_warehouse_id, to_warehouse_id, promoter_id, campaign_id,
+           reference, note, user_id, created_at FROM movements;
+  DROP TABLE movements;
+  ALTER TABLE movements_v2 RENAME TO movements;
+  CREATE INDEX idx_movements_product ON movements(product_id);
+  CREATE INDEX idx_movements_created ON movements(created_at);
+  CREATE INDEX idx_movements_reference ON movements(reference);
+  `,
+];
+
+function migrate(db) {
+  // Version 0 means either a brand-new file or one made before versioning; SCHEMA is idempotent for both.
+  let version = db.prepare('PRAGMA user_version').get().user_version;
+  if (version === 0) {
+    db.exec(SCHEMA);
+    db.exec('PRAGMA user_version = 1');
+    version = 1;
+  }
+  for (let v = version; v <= MIGRATIONS.length; v++) {
+    tx(db, () => {
+      db.exec(MIGRATIONS[v - 1]);
+      db.exec(`PRAGMA user_version = ${v + 1}`);
+    });
+  }
+}
+
 function open(file) {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec('PRAGMA foreign_keys = ON;');
   if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
-  db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
 
@@ -213,4 +352,4 @@ function tx(db, fn) {
   }
 }
 
-module.exports = { open, tx };
+module.exports = { open, tx, SCHEMA, SCHEMA_VERSION: MIGRATIONS.length + 1 };

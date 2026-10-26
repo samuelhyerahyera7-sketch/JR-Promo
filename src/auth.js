@@ -46,7 +46,7 @@ function readToken(req) {
 
 function authenticate(db) {
   const stmt = db.prepare(`
-    SELECT u.id, u.name, u.email, u.role, u.region, u.phone, u.warehouse_id
+    SELECT u.id, u.name, u.email, u.role, u.region, u.phone, u.warehouse_id, u.gender, u.uniform_size, u.badge_code
     FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token = ? AND s.expires_at > ? AND u.active = 1`);
   return (req, res, next) => {

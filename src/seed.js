@@ -6,11 +6,50 @@
  */
 
 const path = require('node:path');
+const crypto = require('node:crypto');
+const zlib = require('node:zlib');
 const { hashPassword } = require('./auth');
 const { tx } = require('./db');
 const stock = require('./stock');
 
 const DEMO_PASSWORD = 'password123';
+
+/** A squiggly PNG "signature" for demo handovers, so the screens have something to show. */
+function demoSignature(seedValue) {
+  const W = 300;
+  const H = 90;
+  const px = Buffer.alloc((W + 1) * H, 255);
+  for (let y = 0; y < H; y++) px[y * (W + 1)] = 0; // filter byte per row
+  const a = 1 + (seedValue % 3);
+  for (let x = 20; x < W - 20; x++) {
+    const t = x / W;
+    const y = Math.round(H / 2 + Math.sin(t * Math.PI * (3 + a)) * 22 * Math.sin(t * Math.PI) + Math.cos(t * 17 + seedValue) * 6);
+    for (let dy = -1; dy <= 1; dy++) {
+      const yy = Math.min(H - 1, Math.max(0, y + dy));
+      px[yy * (W + 1) + 1 + x] = 20;
+    }
+  }
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(zlib.crc32(body));
+    return Buffer.concat([len, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(W, 0);
+  ihdr.writeUInt32BE(H, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 0; // greyscale
+  const png = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', zlib.deflateSync(px)),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+  return `data:image/png;base64,${png.toString('base64')}`;
+}
 
 function seed(db) {
   tx(db, () => {
@@ -23,10 +62,11 @@ function seed(db) {
       dbn: ins("INSERT INTO warehouses (name, city, province, address) VALUES ('Durban', 'Pinetown', 'KwaZulu-Natal', '22 Old Main Rd, Pinetown')"),
     };
 
-    const user = (name, email, role, region, phone, warehouseId = null) =>
+    const user = (name, email, role, region, phone, warehouseId = null, gender = null, size = null) =>
       ins(
-        'INSERT INTO users (name, email, phone, role, region, warehouse_id, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        name, email, phone, role, region, warehouseId, hash,
+        `INSERT INTO users (name, email, phone, role, region, warehouse_id, gender, uniform_size, badge_code, password_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        name, email, phone, role, region, warehouseId, gender, size, crypto.randomBytes(10).toString('hex'), hash,
       );
 
     const u = {
@@ -37,16 +77,19 @@ function seed(db) {
       whJhb: user('Sipho Nkosi', 'warehouse@jrpromo.test', 'warehouse', 'Gauteng', '084 555 0301', wh.jhb),
       whCpt: user('Charlene Adams', 'charlene@jrpromo.test', 'warehouse', 'Western Cape', '084 555 0302', wh.cpt),
       whDbn: user('Ashwin Naidoo', 'ashwin@jrpromo.test', 'warehouse', 'KwaZulu-Natal', '084 555 0303', wh.dbn),
-      p1: user('Nomsa Khumalo', 'promoter@jrpromo.test', 'promoter', 'Gauteng', '071 555 0401'),
-      p2: user('Kagiso Molefe', 'kagiso@jrpromo.test', 'promoter', 'Gauteng', '071 555 0402'),
-      p3: user('Zanele Ndlovu', 'zanele@jrpromo.test', 'promoter', 'KwaZulu-Natal', '071 555 0403'),
-      p4: user('Liam Petersen', 'liam@jrpromo.test', 'promoter', 'Western Cape', '071 555 0404'),
-      p5: user('Ayanda Zulu', 'ayanda@jrpromo.test', 'promoter', 'KwaZulu-Natal', '071 555 0405'),
+      p1: user('Nomsa Khumalo', 'promoter@jrpromo.test', 'promoter', 'Gauteng', '071 555 0401', null, 'female', 'M'),
+      p2: user('Kagiso Molefe', 'kagiso@jrpromo.test', 'promoter', 'Gauteng', '071 555 0402', null, 'male', 'L'),
+      p3: user('Zanele Ndlovu', 'zanele@jrpromo.test', 'promoter', 'KwaZulu-Natal', '071 555 0403', null, 'female', 'S'),
+      p4: user('Liam Petersen', 'liam@jrpromo.test', 'promoter', 'Western Cape', '071 555 0404', null, 'male', 'XL'),
+      p5: user('Ayanda Zulu', 'ayanda@jrpromo.test', 'promoter', 'KwaZulu-Natal', '071 555 0405', null, 'male', 'M'),
     };
 
     const client = (name, contact, email, am) =>
       ins('INSERT INTO clients (name, contact_name, contact_email, account_manager_id) VALUES (?, ?, ?, ?)', name, contact, email, am);
     const cl = {
+      house: ins(
+        "INSERT INTO clients (name, contact_name, contact_email, is_house) VALUES ('JR Promotions (company stock)', 'Thandi Mokoena', 'office@jrpromo.test', 1)",
+      ),
       juice: client('Sunfresh Juices', 'Megan Botha', 'megan@sunfresh.test', u.am1),
       coffee: client('Kalahari Coffee Co.', 'David Mahlangu', 'david@kalaharicoffee.test', u.am1),
       mobile: client('Ubuntu Mobile', 'Priya Govender', 'priya@ubuntumobile.test', u.am2),
@@ -63,7 +106,7 @@ function seed(db) {
       juiceSample: product('SFJ-SMP-200', 'Sunfresh Mango 200ml sample', cl.juice, 'Sample', 4.5, 1500),
       juiceCup: product('SFJ-CUP-50', 'Tasting cups (sleeve of 50)', cl.juice, 'Sample', 18, 60, 'sleeve'),
       juiceAframe: product('SFJ-POS-AFR', 'Sunfresh A-frame board', cl.juice, 'POS Material', 650, 6),
-      juiceTee: product('SFJ-UNI-TEE', 'Sunfresh promoter T-shirt', cl.juice, 'Uniform', 85, 20),
+      juiceTee: product('SFJ-UNI-TEE', 'Sunfresh promoter T-shirt (Unisex · Orange · M)', cl.juice, 'Uniform', 85, 20),
       coffeeSachet: product('KCC-SMP-SCH', 'Kalahari instant sachet', cl.coffee, 'Sample', 2.2, 3000),
       coffeeMug: product('KCC-GFT-MUG', 'Branded enamel mug', cl.coffee, 'Giveaway', 42, 150),
       coffeeUrn: product('KCC-EQP-URN', 'Hot water urn 20L', cl.coffee, 'Equipment', 1450, 2),
@@ -78,7 +121,35 @@ function seed(db) {
       sauceSachet: product('BMS-SMP-SCH', 'Braai sauce 20ml sachet', cl.sauce, 'Sample', 1.6, 2500),
       sauceApron: product('BMS-GFT-APR', 'Braai Master apron', cl.sauce, 'Giveaway', 95, 60),
       sauceTable: product('BMS-EQP-TBL', 'Folding tasting table', cl.sauce, 'Equipment', 890, 4),
+      // Company-owned stock any campaign can use
+      table: product('JR-TBL-FOLD', 'Folding promoter table 1.8m', cl.house, 'Promoter Table', 950, 10),
+      tableSmall: product('JR-TBL-POD', 'Round demo podium table', cl.house, 'Promoter Table', 1650, 4),
+      cloth: product('JR-TBL-CLOTH', 'Black stretch table cloth', cl.house, 'Setup & Display', 280, 15),
+      gazebo: product('JR-SET-GAZ', 'JR gazebo 3x3m (black)', cl.house, 'Setup & Display', 3800, 3),
+      flag: product('JR-SET-FLAG', 'Telescopic banner flag with base', cl.house, 'Setup & Display', 650, 6),
+      cooler: product('JR-EQP-COOL', 'Cooler box 40L', cl.house, 'Equipment', 720, 4),
     };
+    db.prepare("UPDATE products SET gender = 'unisex', size = 'M', colour = 'Orange', style = 'Sunfresh promoter T-shirt' WHERE id = ?").run(p.juiceTee);
+    // Samples with a shelf life are tracked by batch and expiry date
+    for (const id of [p.juiceSample, p.coffeeSachet, p.skinTester, p.sauceSachet]) {
+      db.prepare('UPDATE products SET tracks_expiry = 1 WHERE id = ?').run(id);
+    }
+
+    // JR promoter golf shirt range: ladies & mens, black & white, XS-XXL
+    const polo = {};
+    for (const gender of ['female', 'male']) {
+      for (const colour of ['Black', 'White']) {
+        for (const size of ['XS', 'S', 'M', 'L', 'XL', 'XXL']) {
+          const sku = `JRU-POLO-${gender[0].toUpperCase()}-${colour.toUpperCase()}-${size}`;
+          polo[`${gender[0]}-${colour}-${size}`] = ins(
+            `INSERT INTO products (sku, name, client_id, category, unit_cost, reorder_level, gender, size, colour, style)
+             VALUES (?, ?, ?, 'Uniform', 165, 3, ?, ?, ?, 'JR promoter golf shirt')`,
+            sku, `JR promoter golf shirt (${gender === 'female' ? 'Ladies' : 'Mens'} · ${colour} · ${size})`, cl.house, gender, size, colour,
+          );
+        }
+      }
+    }
+    const day = (offset) => new Date(Date.now() + offset * 864e5).toISOString().slice(0, 10);
 
     // Back-date the ledger so the dashboard has a history to show
     const stamp = (daysAgo, hour = 9) => {
@@ -93,17 +164,27 @@ function seed(db) {
       lastMovement = db.prepare('SELECT COALESCE(MAX(id), 0) AS n FROM movements').get().n;
     };
 
-    const receive = (daysAgo, warehouseId, ref, lines, userId) =>
+    // lines: [productId, qty, expiryOffsetDays?]
+    const receive = (daysAgo, warehouseId, ref, lines, userId, note = null) =>
       dated(daysAgo, () => {
-        for (const [productId, qty] of lines) stock.receive(db, { productId, warehouseId, qty, reference: ref, userId });
+        for (const [productId, qty, expiresIn] of lines) {
+          const expiryDate = expiresIn === undefined ? null : day(expiresIn);
+          stock.receive(db, { productId, warehouseId, qty, reference: ref, batchNo: expiryDate ? `${ref}-L1` : null, expiryDate, note, userId });
+        }
       });
 
-    receive(28, wh.jhb, 'GRN-24101', [[p.juiceSample, 6000], [p.juiceCup, 200], [p.juiceAframe, 12], [p.juiceTee, 60]], u.whJhb);
-    receive(27, wh.jhb, 'GRN-24102', [[p.coffeeSachet, 10000], [p.coffeeMug, 400], [p.coffeeUrn, 6], [p.coffeeWobbler, 1200]], u.whJhb);
+    receive(35, wh.jhb, 'GRN-24088', [[p.juiceSample, 240, -5]], u.whJhb, 'Left over from winter promo');
+    const house = (qtyTables, qtyCloths, qtyGazebos, qtyFlags, qtyCoolers) =>
+      [[p.table, qtyTables], [p.tableSmall, Math.ceil(qtyTables / 4)], [p.cloth, qtyCloths], [p.gazebo, qtyGazebos], [p.flag, qtyFlags], [p.cooler, qtyCoolers]];
+    receive(30, wh.jhb, 'GRN-24090', [...house(20, 30, 5, 10, 8), ...Object.values(polo).map((id) => [id, 8])], u.whJhb, 'Supplier: Cape Union Mart corporate');
+    receive(30, wh.cpt, 'GRN-24091', house(8, 10, 2, 4, 3), u.whCpt);
+    receive(30, wh.dbn, 'GRN-24092', [...house(6, 8, 2, 4, 3), ...Object.values(polo).map((id) => [id, 4])], u.whDbn);
+    receive(28, wh.jhb, 'GRN-24101', [[p.juiceSample, 6000, 20], [p.juiceCup, 200], [p.juiceAframe, 12], [p.juiceTee, 60]], u.whJhb, 'Courier: Ram Hand-to-Hand');
+    receive(27, wh.jhb, 'GRN-24102', [[p.coffeeSachet, 10000, 200], [p.coffeeMug, 400], [p.coffeeUrn, 6], [p.coffeeWobbler, 1200]], u.whJhb);
     receive(26, wh.cpt, 'GRN-24103', [[p.mobileSim, 8000], [p.mobileGazebo, 6], [p.mobileCap, 600], [p.mobileFlyer, 20000]], u.whCpt);
-    receive(25, wh.cpt, 'GRN-24104', [[p.skinTester, 3000], [p.skinBag, 500], [p.skinStand, 20]], u.whCpt);
-    receive(24, wh.dbn, 'GRN-24105', [[p.sauceSachet, 9000], [p.sauceApron, 120], [p.sauceTable, 8]], u.whDbn);
-    receive(20, wh.jhb, 'GRN-24110', [[p.sauceSachet, 4000], [p.sauceApron, 80], [p.skinTester, 1200]], u.whJhb);
+    receive(25, wh.cpt, 'GRN-24104', [[p.skinTester, 3000, 90], [p.skinBag, 500], [p.skinStand, 20]], u.whCpt);
+    receive(24, wh.dbn, 'GRN-24105', [[p.sauceSachet, 9000, 150], [p.sauceApron, 120], [p.sauceTable, 8]], u.whDbn);
+    receive(20, wh.jhb, 'GRN-24110', [[p.sauceSachet, 4000, 45], [p.sauceApron, 80], [p.skinTester, 1200, 12]], u.whJhb);
     dated(18, () => {
       stock.transfer(db, { productId: p.mobileCap, fromWarehouseId: wh.cpt, toWarehouseId: wh.jhb, qty: 200, reference: 'TRF-0001', userId: u.whCpt });
       stock.transfer(db, { productId: p.mobileSim, fromWarehouseId: wh.cpt, toWarehouseId: wh.dbn, qty: 2500, reference: 'TRF-0001', userId: u.whCpt });
@@ -117,14 +198,13 @@ function seed(db) {
       for (const pid of promoters) ins('INSERT INTO campaign_promoters (campaign_id, promoter_id) VALUES (?, ?)', id, pid);
       return id;
     };
-    const day = (offset) => new Date(Date.now() + offset * 864e5).toISOString().slice(0, 10);
     const c = {
       juice: campaign('Sunfresh Summer Tastings', cl.juice, u.am1, 'Gauteng', day(-21), day(30), 'active', [u.p1, u.p2]),
       coffee: campaign('Kalahari Morning Commute', cl.coffee, u.am1, 'Gauteng', day(-14), day(14), 'active', [u.p2]),
       mobile: campaign('Ubuntu Mobile Taxi Rank Drive', cl.mobile, u.am2, 'KwaZulu-Natal', day(-15), day(45), 'active', [u.p3, u.p5]),
       skin: campaign('Protea Mall Sampling', cl.skin, u.am2, 'Western Cape', day(-10), day(20), 'active', [u.p4]),
       sauce: campaign('Braai Master Heritage Month', cl.sauce, u.am1, 'KwaZulu-Natal', day(-40), day(-3), 'completed', [u.p3, u.p5]),
-      juiceDbn: campaign('Sunfresh Durban Launch', cl.juice, u.am1, 'KwaZulu-Natal', day(10), day(40), 'planned', [u.p5]),
+      juiceDbn: campaign('Sunfresh Durban Launch', cl.juice, u.am1, 'KwaZulu-Natal', day(5), day(40), 'planned', [u.p5]),
     };
 
     let reqNo = 0;
@@ -157,25 +237,43 @@ function seed(db) {
           );
         }
       }
+      // Handover records: who at the warehouse processed which promoter, with signature
+      if (['dispatched', 'delivered'].includes(status)) {
+        const uniforms = lines.some(([pid]) => db.prepare('SELECT category FROM products WHERE id = ?').get(pid).category === 'Uniform');
+        const handover = (kind, staffId, signed, daysBack) =>
+          ins(
+            `INSERT INTO handovers (kind, request_id, promoter_id, staff_id, warehouse_id, signature, uniform_clean, uniform_ironed, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            kind, id, promoterId, staffId, staffId ? warehouseId : null, signed ? demoSignature(id) : null,
+            kind !== 'delivery' && uniforms ? 1 : null, kind !== 'delivery' && uniforms ? 1 : null, stamp(daysBack, 10),
+          );
+        if (method === 'collect') {
+          handover('collection', dispatcher, true, daysAgo - 1);
+          db.prepare('UPDATE requests SET delivered_at = dispatched_at WHERE id = ?').run(id);
+        } else {
+          handover('dispatch', dispatcher, false, daysAgo - 1);
+          if (status === 'delivered') handover('delivery', null, true, daysAgo - 2);
+        }
+      }
       return ref;
     };
 
     request({ campaignId: c.sauce, warehouseId: wh.dbn, promoterId: u.p3, by: u.p3, approver: u.am1, dispatcher: u.whDbn, status: 'delivered', daysAgo: 22,
-      lines: [[p.sauceSachet, 3000], [p.sauceApron, 40], [p.sauceTable, 2]] });
+      lines: [[p.sauceSachet, 3000], [p.sauceApron, 40], [p.sauceTable, 2], [p.cloth, 2], [polo['f-Black-S'], 2]] });
     request({ campaignId: c.sauce, warehouseId: wh.dbn, promoterId: u.p5, by: u.am1, approver: u.am1, dispatcher: u.whDbn, status: 'delivered', daysAgo: 21,
-      lines: [[p.sauceSachet, 2500], [p.sauceApron, 30], [p.sauceTable, 1]] });
+      lines: [[p.sauceSachet, 2500], [p.sauceApron, 30], [p.sauceTable, 1], [polo['m-Black-M'], 2]] });
     request({ campaignId: c.juice, warehouseId: wh.jhb, promoterId: u.p1, by: u.p1, approver: u.am1, dispatcher: u.whJhb, status: 'delivered', daysAgo: 19,
-      lines: [[p.juiceSample, 2000], [p.juiceCup, 60], [p.juiceAframe, 2], [p.juiceTee, 4]] });
+      lines: [[p.juiceSample, 2000], [p.juiceCup, 60], [p.juiceAframe, 2], [p.juiceTee, 4], [polo['f-White-M'], 2], [p.table, 1], [p.cloth, 1], [p.cooler, 1]] });
     request({ campaignId: c.juice, warehouseId: wh.jhb, promoterId: u.p2, by: u.p2, approver: u.am1, dispatcher: u.whJhb, status: 'delivered', daysAgo: 18,
-      lines: [[p.juiceSample, 1800], [p.juiceCup, 50], [p.juiceAframe, 2], [p.juiceTee, 4]] });
+      lines: [[p.juiceSample, 1800], [p.juiceCup, 50], [p.juiceAframe, 2], [p.juiceTee, 4], [polo['m-White-L'], 2], [p.table, 1], [p.cloth, 1]] });
     request({ campaignId: c.mobile, warehouseId: wh.dbn, promoterId: u.p3, by: u.p3, approver: u.am2, dispatcher: u.whDbn, status: 'delivered', daysAgo: 14,
       method: 'courier', waybill: 'TCG84412093', lines: [[p.mobileSim, 1500]] });
     request({ campaignId: c.mobile, warehouseId: wh.cpt, promoterId: u.p5, by: u.p5, approver: u.am2, dispatcher: u.whCpt, status: 'delivered', daysAgo: 13,
       method: 'courier', waybill: 'TCG84412871', lines: [[p.mobileGazebo, 1], [p.mobileCap, 150], [p.mobileFlyer, 5000]] });
     request({ campaignId: c.coffee, warehouseId: wh.jhb, promoterId: u.p2, by: u.am1, approver: u.am1, dispatcher: u.whJhb, status: 'delivered', daysAgo: 12,
-      lines: [[p.coffeeSachet, 4000], [p.coffeeMug, 120], [p.coffeeUrn, 1], [p.coffeeWobbler, 300]] });
+      lines: [[p.coffeeSachet, 4000], [p.coffeeMug, 120], [p.coffeeUrn, 1], [p.coffeeWobbler, 300], [p.tableSmall, 1]] });
     request({ campaignId: c.skin, warehouseId: wh.cpt, promoterId: u.p4, by: u.p4, approver: u.am2, dispatcher: u.whCpt, status: 'delivered', daysAgo: 9,
-      lines: [[p.skinTester, 1200], [p.skinBag, 200], [p.skinStand, 2]] });
+      lines: [[p.skinTester, 1200], [p.skinBag, 200], [p.skinStand, 2], [p.table, 1], [p.cloth, 1]] });
     request({ campaignId: c.juice, warehouseId: wh.jhb, promoterId: u.p1, by: u.p1, approver: u.am1, dispatcher: u.whJhb, status: 'dispatched', daysAgo: 3,
       method: 'courier', waybill: 'TCG84419920', lines: [[p.juiceSample, 1600], [p.juiceCup, 40]] });
     request({ campaignId: c.coffee, warehouseId: wh.jhb, promoterId: u.p2, by: u.p2, approver: u.am1, status: 'approved', daysAgo: 1,
@@ -232,21 +330,49 @@ function seed(db) {
         ref, campaignId, promoterId, warehouseId, received ? 'received' : 'pending',
         received ? u.whDbn : null, received ? stamp(daysAgo, 12) : null, stamp(daysAgo + 1, 9),
       );
-      for (const [productId, qty, damaged = 0] of lines) {
-        ins('INSERT INTO return_items (return_id, product_id, qty, qty_good, qty_damaged) VALUES (?, ?, ?, ?, ?)',
-          id, productId, qty, received ? qty - damaged : null, received ? damaged : null);
+      for (const [productId, qty, damaged = 0, laundry = 0] of lines) {
+        const good = qty - damaged - laundry;
+        ins('INSERT INTO return_items (return_id, product_id, qty, qty_good, qty_damaged, qty_laundry) VALUES (?, ?, ?, ?, ?, ?)',
+          id, productId, qty, received ? good : null, received ? damaged : null, received ? laundry : null);
         if (received) {
           dated(daysAgo, () =>
-            stock.returnToWarehouse(db, { productId, warehouseId, promoterId, campaignId, qtyGood: qty - damaged, qtyDamaged: damaged, reference: ref, userId: u.whDbn }),
+            stock.returnToWarehouse(db, { productId, warehouseId, promoterId, campaignId, qtyGood: good, qtyDamaged: damaged, qtyLaundry: laundry, reference: ref, userId: u.whDbn }),
           );
         }
+      }
+      if (received) {
+        const laundry = lines.some(([, , , l]) => l > 0);
+        ins(
+          `INSERT INTO handovers (kind, return_id, promoter_id, staff_id, warehouse_id, signature, uniform_clean, uniform_ironed, note, created_at)
+           VALUES ('return', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          id, promoterId, u.whDbn, warehouseId, demoSignature(id + 7), laundry ? 0 : 1, laundry ? 0 : 1,
+          laundry ? '1 golf shirt came back unwashed' : null, stamp(daysAgo, 12),
+        );
       }
     };
     const held = (productId, promoterId, campaignId) => stock.fieldQty(db, productId, promoterId, campaignId);
     ret('RET-00001', c.sauce, u.p3, wh.dbn,
-      [[p.sauceSachet, held(p.sauceSachet, u.p3, c.sauce)], [p.sauceApron, held(p.sauceApron, u.p3, c.sauce)], [p.sauceTable, 2, 1]], true, 2);
+      [[p.sauceSachet, held(p.sauceSachet, u.p3, c.sauce)], [p.sauceApron, held(p.sauceApron, u.p3, c.sauce)], [p.sauceTable, 2, 1], [p.cloth, 2], [polo['f-Black-S'], 2, 0, 1]], true, 2);
     ret('RET-00002', c.sauce, u.p5, wh.dbn,
-      [[p.sauceSachet, held(p.sauceSachet, u.p5, c.sauce)], [p.sauceApron, held(p.sauceApron, u.p5, c.sauce)], [p.sauceTable, 1]], false, 0);
+      [[p.sauceSachet, held(p.sauceSachet, u.p5, c.sauce)], [p.sauceApron, held(p.sauceApron, u.p5, c.sauce)], [p.sauceTable, 1], [polo['m-Black-M'], 2]], false, 0);
+
+    // Kits: standard setups added to a request in one click
+    const kit = (name, description, items) => {
+      const id = ins('INSERT INTO kits (name, description) VALUES (?, ?)', name, description);
+      for (const [productId, qty] of items) ins('INSERT INTO kit_items (kit_id, product_id, qty) VALUES (?, ?, ?)', id, productId, qty);
+    };
+    kit('In-store tasting setup', 'One table with cloth and a cooler box', [[p.table, 1], [p.cloth, 1], [p.cooler, 1]]);
+    kit('Outdoor activation setup', 'Gazebo, table, cloth and two banner flags', [[p.gazebo, 1], [p.table, 1], [p.cloth, 1], [p.flag, 2]]);
+    kit('Demo podium setup', 'Round podium table with cloth', [[p.tableSmall, 1], [p.cloth, 1]]);
+
+    // Campaign stock plans
+    const plan = (campaignId, items) => {
+      for (const [productId, qty] of items) ins('INSERT INTO campaign_plan (campaign_id, product_id, planned_qty) VALUES (?, ?, ?)', campaignId, productId, qty);
+    };
+    plan(c.juice, [[p.juiceSample, 7000], [p.juiceCup, 180], [p.juiceAframe, 4], [p.table, 2], [p.cloth, 2]]);
+    plan(c.coffee, [[p.coffeeSachet, 7000], [p.coffeeMug, 220], [p.tableSmall, 1]]);
+    plan(c.mobile, [[p.mobileSim, 3000], [p.mobileGazebo, 2], [p.mobileFlyer, 8000]]);
+    plan(c.juiceDbn, [[p.juiceSample, 1500], [p.juiceCup, 40], [p.gazebo, 1], [p.table, 1], [p.cloth, 1], [polo['m-Black-M'], 2]]);
 
     db.prepare("UPDATE stock SET bin = 'A-' || (product_id % 9 + 1) || '-0' || (product_id % 4 + 1)").run();
   });

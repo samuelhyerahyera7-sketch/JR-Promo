@@ -48,7 +48,8 @@ function campaignScope(user, alias = 'c') {
 
 /** SQL fragment restricting clients (alias `cl`) for account managers. */
 function clientScope(user, alias = 'cl') {
-  if (user.role === 'account_manager') return { sql: `${alias}.account_manager_id = ?`, params: [user.id] };
+  // Company-owned stock (tables, gazebos, JR uniforms) is shared by every campaign, so AMs see it too
+  if (user.role === 'account_manager') return { sql: `(${alias}.account_manager_id = ? OR ${alias}.is_house = 1)`, params: [user.id] };
   return { sql: '1=1', params: [] };
 }
 

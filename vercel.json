@@ -2,7 +2,9 @@
   "framework": null,
   "buildCommand": "",
   "outputDirectory": "public",
-  "regions": ["cpt1"],
+  "regions": [
+    "dub1"
+  ],
   "functions": {
     "api/index.js": {
       "includeFiles": "node_modules/jsqr/dist/**",
@@ -10,7 +12,18 @@
     }
   },
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api" },
-    { "source": "/vendor/(.*)", "destination": "/api" }
-  ]
+    {
+      "source": "/api/(.*)",
+      "destination": "/api"
+    },
+    {
+      "source": "/vendor/(.*)",
+      "destination": "/api"
+    }
+  ],
+  "git": {
+    "deploymentEnabled": {
+      "claude/intelligent-darwin-a9tafs": false
+    }
+  }
 }

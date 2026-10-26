@@ -49,14 +49,14 @@ function verifySignedSession(token) {
   return Number(uid);
 }
 
-function createSession(db, userId) {
+async function createSession(db, userId) {
   if (process.env.SESSION_SECRET) {
     const body = `${userId}.${Date.now() + SESSION_DAYS * 864e5}`;
     return `${body}.${signSession(body)}`;
   }
   const token = crypto.randomBytes(32).toString('hex');
   const expires = new Date(Date.now() + SESSION_DAYS * 864e5).toISOString();
-  db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expires);
+  (await db.run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)', token, userId, expires));
   return token;
 }
 
@@ -69,21 +69,21 @@ function readToken(req) {
 }
 
 function authenticate(db) {
-  const stmt = db.prepare(`
+  const stmt = db.stmt(`
     SELECT u.id, u.name, u.email, u.role, u.region, u.phone, u.warehouse_id, u.gender, u.uniform_size, u.badge_code
     FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token = ? AND s.expires_at > ? AND u.active = 1`);
-  const byId = db.prepare(
+  const byId = db.stmt(
     'SELECT u.id, u.name, u.email, u.role, u.region, u.phone, u.warehouse_id, u.gender, u.uniform_size, u.badge_code FROM users u WHERE u.id = ? AND u.active = 1',
   );
-  return (req, res, next) => {
+  return async (req, res, next) => {
     const token = readToken(req);
     let user = null;
     if (token && process.env.SESSION_SECRET && token.includes('.')) {
       const uid = verifySignedSession(token);
-      user = uid && byId.get(uid);
+      user = uid && await byId.get(uid);
     } else if (token) {
-      user = stmt.get(token, new Date().toISOString());
+      user = await stmt.get(token, new Date().toISOString());
     }
     if (!user) return next(new HttpError(401, 'Please sign in'));
     req.user = { ...user };

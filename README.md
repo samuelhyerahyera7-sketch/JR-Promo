@@ -126,12 +126,14 @@ The system works in **units only**. No Rand values, stock valuations or costs ar
 
 ## Running it
 
-Requires **Node.js 22.13 or newer**. It uses Node's built-in SQLite, so there is no database server to install.
+Requires **Node.js 22.13 or newer** and a **PostgreSQL** database (Supabase in production; any PostgreSQL 14+ works).
 
 ```bash
 npm install
-npm start            # http://localhost:3000
+DATABASE_URL=postgresql://user:password@host:5432/db npm start   # http://localhost:3000
 ```
+
+The schema is created on first start and upgraded automatically after updates.
 
 On first start with an empty database it loads **demo data** (fictional clients and staff). All demo passwords are `password123`:
 
@@ -144,7 +146,7 @@ On first start with an empty database it loads **demo data** (fictional clients 
 | Warehouse | `warehouse@jrpromo.test` (JHB), `charlene@…` (CPT), `ashwin@…` (DBN) |
 | Promoter | `promoter@jrpromo.test`, `kagiso@…`, `zanele@…`, `liam@…`, `ayanda@…` |
 
-`npm run seed` wipes the database and reloads the demo data.
+`npm run seed` wipes the database and reloads the demo data. It refuses to touch anything but a local database unless `SEED_CONFIRM=wipe` is also set.
 
 ### Going live with real data
 
@@ -156,24 +158,28 @@ ADMIN_EMAIL=you@jrpromotions.co.za ADMIN_PASSWORD='a-strong-password' ADMIN_NAME
 
 Then sign in and set up, in this order: **Warehouses → Staff & users → Clients → Products** (from Stock on hand), then **Receive stock** to load opening balances.
 
-### Online demo (Vercel)
+### Hosting: Vercel + Supabase
 
-`api/index.js` and `vercel.json` let the app run on Vercel as a **demo**: the database lives in the function's temporary storage and is refilled with demo data whenever a fresh instance starts, so nothing entered is kept. Use it to try things out, not for real stock.
+`api/index.js` and `vercel.json` run the app on Vercel, with the data in a Supabase PostgreSQL database, so everything is kept.
 
-Set a `SESSION_SECRET` environment variable there: logins then use signed tokens that every copy of the function accepts, instead of a sessions table only one copy can see. Turn on Fluid compute so one copy handles concurrent requests; separate copies still keep separate demo data.
+- `DATABASE_URL`: Supabase's **Transaction pooler** connection string (Connect → Transaction pooler, port 6543), with the database password filled in. The direct connection is IPv6-only and won't work from Vercel.
+- `SESSION_SECRET`: a long random string. Logins use signed tokens, so every copy of the function accepts them.
+- The function runs in Dublin (`dub1`), next to the Supabase project in Ireland (`eu-west-1`): each page makes many small database queries, so the server must sit near the database.
+- Supabase backs up the database daily (Pro plan keeps 7 days; on the Free plan download backups yourself). Free projects pause after a week without activity; restore them from the Supabase dashboard.
 
 ### Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `3000` | HTTP port |
-| `DB_FILE` | `data/jr-promo.db` | SQLite database file |
+| `DATABASE_URL` | | PostgreSQL connection string (required) |
+| `SESSION_SECRET` | | Signs login tokens; set it in production |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_NAME` | | Create the first director instead of loading demo data (empty database only) |
 
 ### Hosting notes
 
-- The database is a single file. Host on something with a **persistent disk** (a small VPS, Railway or Render with a volume, an office server). Serverless platforms with ephemeral filesystems will lose data.
-- Back up by copying `data/jr-promo.db` (for example with `sqlite3 data/jr-promo.db ".backup backup.db"`) on a schedule.
+- Any host that can reach the database works (Vercel, a VPS, an office server). Keep the app server close to the database.
+- Back up with `pg_dump "$DATABASE_URL" > backup.sql`, or Supabase's own backups.
 - Put it behind HTTPS (for example Caddy or nginx) before staff use it over the internet. **Phone camera scanning and geotags only work over HTTPS** (or on `localhost`); handheld scanners and typing codes work either way.
 
 ## Development
@@ -182,15 +188,16 @@ Set a `SESSION_SECRET` environment variable there: logins then use signed tokens
 npm test
 ```
 
-The tests run the API end to end against an in-memory database: the full request → approve → issue (signature + uniform check) → use → return (with laundry) cycle, expiry batches and first-expiry-first-out picking, packs and scanning stock out, BA forms and clearing for payment, message access rules, uniform ranges, QR/badge scanning, waybill uploads, campaign plans and kits, role permissions, transaction rollback, upgrading an older database, and a final check that the ledger reconciles with warehouse, field and laundry stock (and batch totals) for every product.
+The tests need a throwaway PostgreSQL database, which they wipe on every run: `TEST_DATABASE_URL` (default `postgresql://jr:jr@localhost:5432/jr_test`). They run the API end to end: the full request → approve → issue (signature + uniform check) → use → return (with laundry) cycle, expiry batches and first-expiry-first-out picking, packs and scanning stock out, BA forms and clearing for payment, message access rules, uniform ranges, QR/badge scanning, waybill uploads, campaign plans and kits, role permissions, transaction rollback, reconnecting to an existing database, and a final check that the ledger reconciles with warehouse, field and laundry stock (and batch totals) for every product.
 
 ### Project layout
 
 ```
 src/
-  server.js         start-up, first-run seeding
+  server.js         start-up for a normal server
+  bootstrap.js      connect, upgrade the schema, first-run setup (director or demo data)
   app.js            Express app and route wiring
-  db.js             schema, upgrades for older databases, transaction helper
+  db.js             PostgreSQL schema and upgrades, async query helpers, transactions
   auth.js           password hashing, sessions, role checks
   access.js         row-level rules (who can see which campaign)
   colours.js        campaign shelf colours

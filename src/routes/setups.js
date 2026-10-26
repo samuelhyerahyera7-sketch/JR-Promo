@@ -30,8 +30,8 @@ function datetime(value, field, { required = false } = {}) {
   return s;
 }
 
-function nextRef(db) {
-  const row = db.prepare('SELECT COALESCE(MAX(id), 0) + 1 AS n FROM setups').get();
+async function nextRef(db) {
+  const row = (await db.get('SELECT COALESCE(MAX(id), 0) + 1 AS n FROM setups'));
   return `SET-${String(row.n).padStart(5, '0')}`;
 }
 
@@ -39,7 +39,7 @@ const SETUP_SELECT = `
   SELECT st.*, c.name AS campaign_name, c.colour AS campaign_colour, c.account_manager_id, cl.name AS client_name,
          w.name AS warehouse_name, ld.name AS lead_name, ld.phone AS lead_phone,
          lb.name AS loaded_by_name, sb.name AS set_up_by_name, kb.name AS struck_by_name, rb.name AS returned_by_name,
-         (SELECT group_concat(u.name, ', ') FROM setup_crew sc JOIN users u ON u.id = sc.user_id WHERE sc.setup_id = st.id) AS crew_names,
+         (SELECT string_agg(u.name, ', ') FROM setup_crew sc JOIN users u ON u.id = sc.user_id WHERE sc.setup_id = st.id) AS crew_names,
          (SELECT COALESCE(SUM(qty), 0) FROM setup_items si WHERE si.setup_id = st.id) AS units
   FROM setups st
   JOIN campaigns c ON c.id = st.campaign_id
@@ -61,28 +61,18 @@ function setupScope(user) {
   };
 }
 
-function loadSetup(db, user, id) {
+async function loadSetup(db, user, id) {
   const scope = setupScope(user);
-  const s = v.found(db.prepare(`${SETUP_SELECT} WHERE st.id = ? AND ${scope.sql}`).get(id, ...scope.params), 'Setup');
-  s.items = db
-    .prepare(
-      `SELECT si.*, p.sku, p.name AS product_name, p.category, p.barcode,
+  const s = v.found((await db.get(`${SETUP_SELECT} WHERE st.id = ? AND ${scope.sql}`, id, ...scope.params)), 'Setup');
+  s.items = (await db.all(`SELECT si.*, p.sku, p.name AS product_name, p.category, p.barcode,
          COALESCE((SELECT qty FROM stock s WHERE s.product_id = si.product_id AND s.warehouse_id = ?), 0) AS warehouse_qty,
          (SELECT bin FROM stock s WHERE s.product_id = si.product_id AND s.warehouse_id = ?) AS bin,
          (SELECT sc.colour FROM campaigns sc WHERE sc.id = p.campaign_id) AS shelf_colour
-       FROM setup_items si JOIN products p ON p.id = si.product_id WHERE si.setup_id = ? ORDER BY p.category, p.name`,
-    )
-    .all(s.warehouse_id, s.warehouse_id, id);
-  s.crew = db
-    .prepare('SELECT u.id, u.name, u.phone, u.role FROM setup_crew sc JOIN users u ON u.id = sc.user_id WHERE sc.setup_id = ? ORDER BY u.name')
-    .all(id);
-  s.attachments = db
-    .prepare(
-      `SELECT a.id, a.caption, a.filename, a.mime, a.size, a.created_at, a.uploaded_by, a.lat, a.lng, a.accuracy, u.name AS uploaded_by_name
-       FROM attachments a JOIN users u ON u.id = a.uploaded_by WHERE a.setup_id = ? ORDER BY a.id`,
-    )
-    .all(id);
-  s.scan_check = scanCheckFor(db, 'setup', s.ref);
+       FROM setup_items si JOIN products p ON p.id = si.product_id WHERE si.setup_id = ? ORDER BY p.category, p.name`, s.warehouse_id, s.warehouse_id, id));
+  s.crew = (await db.all('SELECT u.id, u.name, u.phone, u.role FROM setup_crew sc JOIN users u ON u.id = sc.user_id WHERE sc.setup_id = ? ORDER BY u.name', id));
+  s.attachments = (await db.all(`SELECT a.id, a.caption, a.filename, a.mime, a.size, a.created_at, a.uploaded_by, a.lat, a.lng, a.accuracy, u.name AS uploaded_by_name
+       FROM attachments a JOIN users u ON u.id = a.uploaded_by WHERE a.setup_id = ? ORDER BY a.id`, id));
+  s.scan_check = await scanCheckFor(db, 'setup', s.ref);
   const onCrew = s.lead_id === user.id || s.crew.some((c) => c.id === user.id);
   const campaign = { id: s.campaign_id, account_manager_id: s.account_manager_id };
   s.can_plan = ['scheduled'].includes(s.status) && (canManageCampaign(user, campaign) || user.role === 'warehouse_manager');
@@ -92,15 +82,15 @@ function loadSetup(db, user, id) {
   return s;
 }
 
-function assertCrew(db, userId, label) {
-  const u = db.prepare('SELECT role, active, name FROM users WHERE id = ?').get(userId);
+async function assertCrew(db, userId, label) {
+  const u = (await db.get('SELECT role, active, name FROM users WHERE id = ?', userId));
   if (!u || !u.active || !CREW_ROLES.includes(u.role)) throw new HttpError(400, `${label} must be an active promoter or warehouse staff member`);
 }
 
 function setupRoutes(db) {
   const r = express.Router();
 
-  r.get('/', (req, res) => {
+  r.get('/', async (req, res) => {
     const scope = setupScope(req.user);
     const where = [scope.sql];
     const params = [...scope.params];
@@ -112,16 +102,14 @@ function setupRoutes(db) {
       params.push(Number(req.query.campaign_id));
     }
     res.json(
-      db
-        .prepare(`${SETUP_SELECT} WHERE ${where.join(' AND ')} ORDER BY ${when === 'done' ? 'st.setup_at DESC' : 'st.setup_at'} LIMIT 300`)
-        .all(...params),
+      (await db.all(`${SETUP_SELECT} WHERE ${where.join(' AND ')} ORDER BY ${when === 'done' ? 'st.setup_at DESC' : 'st.setup_at'} LIMIT 300`, ...params)),
     );
   });
 
-  r.get('/:id', (req, res) => res.json(loadSetup(db, req.user, v.int(req.params.id, 'id', { required: true }))));
+  r.get('/:id', async (req, res) => res.json(await loadSetup(db, req.user, v.int(req.params.id, 'id', { required: true }))));
 
-  const readBody = (b, user, existingCampaignId) => {
-    const campaign = assertCampaign(db, user, v.int(b.campaign_id ?? existingCampaignId, 'Campaign', { required: true }));
+  const readBody = async (b, user, existingCampaignId) => {
+    const campaign = await assertCampaign(db, user, v.int(b.campaign_id ?? existingCampaignId, 'Campaign', { required: true }));
     if (!canManageCampaign(user, campaign) && user.role !== 'warehouse_manager') {
       throw new HttpError(403, 'Only the account manager, warehouse manager or office can plan setups for this campaign');
     }
@@ -129,10 +117,10 @@ function setupRoutes(db) {
     const strikeAt = datetime(b.strike_at, 'Strike down date and time');
     if (strikeAt && strikeAt < setupAt) throw new HttpError(400, 'Strike down cannot be before the setup');
     const leadId = v.int(b.lead_id, 'Crew lead', { required: true });
-    assertCrew(db, leadId, 'Crew lead');
+    await assertCrew(db, leadId, 'Crew lead');
     const crew = [...new Set((Array.isArray(b.crew_ids) ? b.crew_ids : []).map(Number).filter((x) => x && x !== leadId))];
-    for (const c of crew) assertCrew(db, c, 'Crew members');
-    const allowed = new Set(campaignProducts(db, campaign).map((p) => p.id));
+    for (const c of crew) await assertCrew(db, c, 'Crew members');
+    const allowed = new Set((await campaignProducts(db, campaign)).map((p) => p.id));
     const items = v.items(b.items, 'the equipment list').map((i) => ({
       productId: v.int(i.product_id, 'Product', { required: true }),
       qty: v.int(i.qty, 'Quantity', { required: true, min: 1 }),
@@ -140,7 +128,7 @@ function setupRoutes(db) {
     for (const i of items) if (!allowed.has(i.productId)) throw new HttpError(400, `Product #${i.productId} can't be used on this campaign`);
     if (new Set(items.map((i) => i.productId)).size !== items.length) throw new HttpError(400, 'Each product may appear once');
     const warehouseId = v.int(b.warehouse_id, 'Warehouse', { required: true });
-    v.found(db.prepare('SELECT 1 FROM warehouses WHERE id = ? AND active = 1').get(warehouseId), 'Warehouse');
+    v.found((await db.get('SELECT 1 FROM warehouses WHERE id = ? AND active = 1', warehouseId)), 'Warehouse');
     return {
       campaign,
       fields: {
@@ -158,48 +146,44 @@ function setupRoutes(db) {
     };
   };
 
-  const saveChildren = (setupId, crew, items) => {
-    db.prepare('DELETE FROM setup_crew WHERE setup_id = ?').run(setupId);
-    db.prepare('DELETE FROM setup_items WHERE setup_id = ?').run(setupId);
-    for (const c of crew) db.prepare('INSERT INTO setup_crew (setup_id, user_id) VALUES (?, ?)').run(setupId, c);
-    for (const i of items) db.prepare('INSERT INTO setup_items (setup_id, product_id, qty) VALUES (?, ?, ?)').run(setupId, i.productId, i.qty);
+  const saveChildren = async (setupId, crew, items) => {
+    (await db.run('DELETE FROM setup_crew WHERE setup_id = ?', setupId));
+    (await db.run('DELETE FROM setup_items WHERE setup_id = ?', setupId));
+    for (const c of crew) (await db.run('INSERT INTO setup_crew (setup_id, user_id) VALUES (?, ?)', setupId, c));
+    for (const i of items) (await db.run('INSERT INTO setup_items (setup_id, product_id, qty) VALUES (?, ?, ?)', setupId, i.productId, i.qty));
   };
 
-  r.post('/', allow(PLANNERS), (req, res) => {
-    const { campaign, fields, crew, items } = readBody(req.body, req.user);
-    const id = tx(db, () => {
+  r.post('/', allow(PLANNERS), async (req, res) => {
+    const { campaign, fields, crew, items } = await readBody(req.body, req.user);
+    const id = await tx(db, async () => {
       const cols = Object.keys(fields);
-      const info = db
-        .prepare(`INSERT INTO setups (ref, campaign_id, created_by, ${cols.join(', ')}) VALUES (?, ?, ?, ${cols.map(() => '?').join(', ')})`)
-        .run(nextRef(db), campaign.id, req.user.id, ...Object.values(fields));
-      saveChildren(info.lastInsertRowid, crew, items);
-      return info.lastInsertRowid;
+      const info = (await db.insert(`INSERT INTO setups (ref, campaign_id, created_by, ${cols.join(', ')}) VALUES (?, ?, ?, ${cols.map(() => '?').join(', ')})`, await nextRef(db), campaign.id, req.user.id, ...Object.values(fields)));
+      await saveChildren(info, crew, items);
+      return info;
     });
-    res.status(201).json(loadSetup(db, req.user, id));
+    res.status(201).json(await loadSetup(db, req.user, id));
   });
 
-  r.put('/:id', allow(PLANNERS), (req, res) => {
-    const existing = loadSetup(db, req.user, v.int(req.params.id, 'id', { required: true }));
+  r.put('/:id', allow(PLANNERS), async (req, res) => {
+    const existing = await loadSetup(db, req.user, v.int(req.params.id, 'id', { required: true }));
     if (!existing.can_plan) throw new HttpError(409, `${existing.ref} can only be changed before it is loaded`);
-    const { campaign, fields, crew, items } = readBody(req.body, req.user, existing.campaign_id);
-    tx(db, () => {
-      db.prepare(`UPDATE setups SET campaign_id = ?, ${Object.keys(fields).map((c) => `${c} = ?`).join(', ')} WHERE id = ?`).run(
-        campaign.id,
+    const { campaign, fields, crew, items } = await readBody(req.body, req.user, existing.campaign_id);
+    await tx(db, async () => {
+      (await db.run(`UPDATE setups SET campaign_id = ?, ${Object.keys(fields).map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, campaign.id,
         ...Object.values(fields),
-        existing.id,
-      );
-      saveChildren(existing.id, crew, items);
+        existing.id));
+      await saveChildren(existing.id, crew, items);
     });
-    res.json(loadSetup(db, req.user, existing.id));
+    res.json(await loadSetup(db, req.user, existing.id));
   });
 
   // Warehouse loads the equipment out; it is then held by the crew lead until it comes back
-  r.post('/:id/load', allow(OPERATORS), (req, res) => {
-    const s = loadSetup(db, req.user, v.int(req.params.id, 'id', { required: true }));
+  r.post('/:id/load', allow(OPERATORS), async (req, res) => {
+    const s = await loadSetup(db, req.user, v.int(req.params.id, 'id', { required: true }));
     if (!s.can_load) throw new HttpError(409, `${s.ref} is ${s.status}`);
-    tx(db, () => {
+    await tx(db, async () => {
       for (const item of s.items) {
-        stock.dispatch(db, {
+        await stock.dispatch(db, {
           productId: item.product_id,
           warehouseId: s.warehouse_id,
           promoterId: s.lead_id,
@@ -208,56 +192,52 @@ function setupRoutes(db) {
           reference: s.ref,
           userId: req.user.id,
         });
-        db.prepare('UPDATE setup_items SET qty_out = ? WHERE id = ?').run(item.qty, item.id);
+        (await db.run('UPDATE setup_items SET qty_out = ? WHERE id = ?', item.qty, item.id));
       }
       const expected = new Map(s.items.map((i) => [i.product_id, i.qty]));
-      checkScansOut(db, req.user, { kind: 'setup', reference: s.ref, warehouseId: s.warehouse_id, expected, scans: (req.body || {}).scans, override: (req.body || {}).scan_override });
-      db.prepare("UPDATE setups SET status = 'loaded', loaded_by = ?, loaded_at = ? WHERE id = ?").run(req.user.id, new Date().toISOString(), s.id);
+      await checkScansOut(db, req.user, { kind: 'setup', reference: s.ref, warehouseId: s.warehouse_id, expected, scans: (req.body || {}).scans, override: (req.body || {}).scan_override });
+      (await db.run("UPDATE setups SET status = 'loaded', loaded_by = ?, loaded_at = ? WHERE id = ?", req.user.id, new Date().toISOString(), s.id));
     });
-    res.json(loadSetup(db, req.user, s.id));
+    res.json(await loadSetup(db, req.user, s.id));
   });
 
   // Crew confirms on site, with the phone's location
-  r.post('/:id/set-up', (req, res) => {
-    const s = loadSetup(db, req.user, v.int(req.params.id, 'id', { required: true }));
+  r.post('/:id/set-up', async (req, res) => {
+    const s = await loadSetup(db, req.user, v.int(req.params.id, 'id', { required: true }));
     if (!s.can_mark || s.status !== 'loaded') throw new HttpError(409, `${s.ref} can't be marked as set up now`);
     const loc = v.geo(req.body.location);
-    db.prepare("UPDATE setups SET status = 'set_up', set_up_by = ?, set_up_at = ?, set_up_lat = ?, set_up_lng = ? WHERE id = ?").run(
-      req.user.id,
+    (await db.run("UPDATE setups SET status = 'set_up', set_up_by = ?, set_up_at = ?, set_up_lat = ?, set_up_lng = ? WHERE id = ?", req.user.id,
       new Date().toISOString(),
       loc.lat,
       loc.lng,
-      s.id,
-    );
-    res.json(loadSetup(db, req.user, s.id));
+      s.id));
+    res.json(await loadSetup(db, req.user, s.id));
   });
 
-  r.post('/:id/strike', (req, res) => {
-    const s = loadSetup(db, req.user, v.int(req.params.id, 'id', { required: true }));
+  r.post('/:id/strike', async (req, res) => {
+    const s = await loadSetup(db, req.user, v.int(req.params.id, 'id', { required: true }));
     if (!s.can_mark) throw new HttpError(409, `${s.ref} can't be marked as struck down now`);
     const loc = v.geo(req.body.location);
-    db.prepare("UPDATE setups SET status = 'struck', struck_by = ?, struck_at = ?, struck_lat = ?, struck_lng = ? WHERE id = ?").run(
-      req.user.id,
+    (await db.run("UPDATE setups SET status = 'struck', struck_by = ?, struck_at = ?, struck_lat = ?, struck_lng = ? WHERE id = ?", req.user.id,
       new Date().toISOString(),
       loc.lat,
       loc.lng,
-      s.id,
-    );
-    res.json(loadSetup(db, req.user, s.id));
+      s.id));
+    res.json(await loadSetup(db, req.user, s.id));
   });
 
   // Warehouse checks the equipment back in. Anything not counted stays against the crew lead.
-  r.post('/:id/return', allow(OPERATORS), (req, res) => {
-    const s = loadSetup(db, req.user, v.int(req.params.id, 'id', { required: true }));
+  r.post('/:id/return', allow(OPERATORS), async (req, res) => {
+    const s = await loadSetup(db, req.user, v.int(req.params.id, 'id', { required: true }));
     if (!s.can_return) throw new HttpError(409, `${s.ref} is ${s.status}`);
     const counts = new Map((req.body.items || []).map((i) => [Number(i.id), i]));
-    tx(db, () => {
+    await tx(db, async () => {
       for (const item of s.items) {
         const c = counts.get(item.id) || {};
         const good = v.int(c.qty_good ?? item.qty_out, `Good qty for ${item.sku}`, { min: 0 });
         const damaged = v.int(c.qty_damaged ?? 0, `Damaged qty for ${item.sku}`, { min: 0 });
         if (good + damaged > item.qty_out) throw new HttpError(400, `${item.sku}: more than the ${item.qty_out} that went out`);
-        stock.returnToWarehouse(db, {
+        await stock.returnToWarehouse(db, {
           productId: item.product_id,
           warehouseId: s.warehouse_id,
           promoterId: s.lead_id,
@@ -267,22 +247,20 @@ function setupRoutes(db) {
           reference: s.ref,
           userId: req.user.id,
         });
-        db.prepare('UPDATE setup_items SET qty_good = ?, qty_damaged = ? WHERE id = ?').run(good, damaged, item.id);
+        (await db.run('UPDATE setup_items SET qty_good = ?, qty_damaged = ? WHERE id = ?', good, damaged, item.id));
       }
       const now = new Date().toISOString();
-      db.prepare(
-        `UPDATE setups SET status = 'returned', returned_by = ?, returned_at = ?,
-           struck_at = COALESCE(struck_at, ?), struck_by = COALESCE(struck_by, ?) WHERE id = ?`,
-      ).run(req.user.id, now, now, req.user.id, s.id);
+      (await db.run(`UPDATE setups SET status = 'returned', returned_by = ?, returned_at = ?,
+           struck_at = COALESCE(struck_at, ?), struck_by = COALESCE(struck_by, ?) WHERE id = ?`, req.user.id, now, now, req.user.id, s.id));
     });
-    res.json(loadSetup(db, req.user, s.id));
+    res.json(await loadSetup(db, req.user, s.id));
   });
 
-  r.post('/:id/cancel', allow(PLANNERS), (req, res) => {
-    const s = loadSetup(db, req.user, v.int(req.params.id, 'id', { required: true }));
+  r.post('/:id/cancel', allow(PLANNERS), async (req, res) => {
+    const s = await loadSetup(db, req.user, v.int(req.params.id, 'id', { required: true }));
     if (!s.can_plan) throw new HttpError(409, 'Only setups that have not been loaded can be cancelled');
-    db.prepare("UPDATE setups SET status = 'cancelled' WHERE id = ?").run(s.id);
-    res.json(loadSetup(db, req.user, s.id));
+    (await db.run("UPDATE setups SET status = 'cancelled' WHERE id = ?", s.id));
+    res.json(await loadSetup(db, req.user, s.id));
   });
 
   return r;

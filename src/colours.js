@@ -21,11 +21,9 @@ const CAMPAIGN_COLOURS = [
 const COLOUR_KEYS = CAMPAIGN_COLOURS.map((c) => c.key);
 
 /** The colour fewest running campaigns are using, so neighbouring shelves differ. */
-function nextColour(db) {
+async function nextColour(db) {
   const used = new Map(
-    db
-      .prepare("SELECT colour, COUNT(*) AS n FROM campaigns WHERE colour IS NOT NULL AND status IN ('planned','active') GROUP BY colour")
-      .all()
+    (await db.all("SELECT colour, COUNT(*) AS n FROM campaigns WHERE colour IS NOT NULL AND status IN ('planned','active') GROUP BY colour"))
       .map((r) => [r.colour, r.n]),
   );
   return COLOUR_KEYS.reduce((best, key) => ((used.get(key) || 0) < (used.get(best) || 0) ? key : best), COLOUR_KEYS[0]);

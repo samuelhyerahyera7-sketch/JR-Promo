@@ -13,7 +13,7 @@ const { lowStock } = require('./dashboard');
  *   "missing"    - stock or paperwork that should have come back or been confirmed
  * plus stock health (expiry, low stock, laundry).
  */
-function buildReminders(db, user) {
+async function buildReminders(db, user) {
   const out = [];
   const add = (r) => out.push(r);
   const role = user.role;
@@ -38,15 +38,11 @@ function buildReminders(db, user) {
     const c = camp('c');
     const wh = role === 'warehouse' && user.warehouse_id ? ' AND r.warehouse_id = ?' : '';
     const whp = role === 'warehouse' && user.warehouse_id ? [user.warehouse_id] : [];
-    for (const r of db
-      .prepare(
-        `SELECT r.id, r.ref, r.needed_by, u.name AS promoter_name, w.name AS warehouse_name
+    for (const r of (await db.all(`SELECT r.id, r.ref, r.needed_by, u.name AS promoter_name, w.name AS warehouse_name
          FROM requests r JOIN campaigns c ON c.id = r.campaign_id JOIN users u ON u.id = r.promoter_id
          JOIN warehouses w ON w.id = r.warehouse_id
          WHERE r.status IN ('approved','picking') AND r.needed_by IS NOT NULL AND r.needed_by <= ? AND ${c.sql}${wh}
-         ORDER BY r.needed_by`,
-      )
-      .all(tomorrow, ...c.params, ...whp)) {
+         ORDER BY r.needed_by`, tomorrow, ...c.params, ...whp))) {
       const late = r.needed_by < today;
       add({
         group: 'out',
@@ -61,14 +57,10 @@ function buildReminders(db, user) {
 
   if (mgmt || am) {
     const c = camp('c');
-    for (const r of db
-      .prepare(
-        `SELECT r.id, r.ref, r.created_at, r.needed_by, u.name AS promoter_name FROM requests r
+    for (const r of (await db.all(`SELECT r.id, r.ref, r.created_at, r.needed_by, u.name AS promoter_name FROM requests r
          JOIN campaigns c ON c.id = r.campaign_id JOIN users u ON u.id = r.promoter_id
-         WHERE r.status = 'pending' AND (r.created_at <= datetime('now', '-1 day') OR (r.needed_by IS NOT NULL AND r.needed_by <= ?))
-           AND ${c.sql} ORDER BY r.id`,
-      )
-      .all(tomorrow, ...c.params)) {
+         WHERE r.status = 'pending' AND (r.created_at <= to_char(now() AT TIME ZONE 'UTC' - interval '1 days', 'YYYY-MM-DD HH24:MI:SS') OR (r.needed_by IS NOT NULL AND r.needed_by <= ?))
+           AND ${c.sql} ORDER BY r.id`, tomorrow, ...c.params))) {
       add({
         group: 'out',
         severity: r.needed_by && r.needed_by <= tomorrow ? 'high' : 'medium',
@@ -83,19 +75,15 @@ function buildReminders(db, user) {
   // Campaigns starting within 7 days (or running) whose planned stock hasn't been approved or sent
   if (!promoter) {
     const c = camp('c');
-    for (const row of db
-      .prepare(
-        `SELECT c.id, c.name, c.start_date, c.status,
-           SUM(MAX(cp.planned_qty
+    for (const row of (await db.all(`SELECT * FROM (SELECT c.id, c.name, c.start_date, c.status,
+           SUM(GREATEST(cp.planned_qty
              - COALESCE((SELECT SUM(m.qty) FROM movements m WHERE m.type = 'dispatch' AND m.campaign_id = c.id AND m.product_id = cp.product_id), 0)
              - COALESCE((SELECT SUM(ri.qty_approved) FROM request_items ri JOIN requests r ON r.id = ri.request_id
                  WHERE r.campaign_id = c.id AND ri.product_id = cp.product_id AND r.status IN ('approved','picking')), 0), 0)) AS outstanding,
            COUNT(*) AS lines
          FROM campaigns c JOIN campaign_plan cp ON cp.campaign_id = c.id
          WHERE c.status IN ('planned','active') AND (c.start_date IS NULL OR c.start_date <= ?) AND ${c.sql}
-         GROUP BY c.id HAVING outstanding > 0`,
-      )
-      .all(saToday(7), ...c.params)) {
+         GROUP BY c.id) x WHERE x.outstanding > 0`, saToday(7), ...c.params))) {
       const started = row.start_date && row.start_date <= today;
       add({
         group: 'out',
@@ -112,13 +100,9 @@ function buildReminders(db, user) {
   {
     const c = camp('c');
     const p = promoterOnly('r.promoter_id');
-    for (const r of db
-      .prepare(
-        `SELECT r.id, r.ref, r.dispatched_at, r.waybill, u.name AS promoter_name FROM requests r
+    for (const r of (await db.all(`SELECT r.id, r.ref, r.dispatched_at, r.waybill, u.name AS promoter_name FROM requests r
          JOIN campaigns c ON c.id = r.campaign_id JOIN users u ON u.id = r.promoter_id
-         WHERE r.status = 'dispatched' AND r.dispatched_at <= ? AND ${c.sql} AND ${p.sql}`,
-      )
-      .all(new Date(Date.now() - 3 * 864e5).toISOString(), ...c.params, ...p.params)) {
+         WHERE r.status = 'dispatched' AND r.dispatched_at <= ? AND ${c.sql} AND ${p.sql}`, new Date(Date.now() - 3 * 864e5).toISOString(), ...c.params, ...p.params))) {
       add({
         group: 'missing',
         severity: 'high',
@@ -134,18 +118,14 @@ function buildReminders(db, user) {
   {
     const c = camp('c');
     const p = promoterOnly('f.promoter_id');
-    for (const row of db
-      .prepare(
-        `SELECT f.promoter_id, u.name AS promoter_name, c.id AS campaign_id, c.name AS campaign_name, c.end_date,
+    for (const row of (await db.all(`SELECT f.promoter_id, u.name AS promoter_name, c.id AS campaign_id, c.name AS campaign_name, c.end_date,
            SUM(f.qty) AS units, SUM(CASE WHEN pr.category = 'Uniform' THEN f.qty ELSE 0 END) AS uniforms,
            SUM(CASE WHEN pr.category IN ('Promoter Table','Setup & Display','Equipment') THEN f.qty ELSE 0 END) AS equipment
          FROM field_stock f JOIN campaigns c ON c.id = f.campaign_id JOIN users u ON u.id = f.promoter_id
          JOIN products pr ON pr.id = f.product_id
          WHERE f.qty > 0 AND (c.status IN ('completed','cancelled') OR (c.end_date IS NOT NULL AND c.end_date < ?))
            AND ${c.sql} AND ${p.sql}
-         GROUP BY f.promoter_id, c.id ORDER BY c.end_date`,
-      )
-      .all(today, ...c.params, ...p.params)) {
+         GROUP BY f.promoter_id, u.name, c.id ORDER BY c.end_date`, today, ...c.params, ...p.params))) {
       const parts = [];
       if (row.uniforms) parts.push(`${row.uniforms} uniform item(s)`);
       if (row.equipment) parts.push(`${row.equipment} table/setup item(s)`);
@@ -166,16 +146,13 @@ function buildReminders(db, user) {
   {
     const c = camp('c');
     const p = promoterOnly('rt.promoter_id');
-    for (const row of db
-      .prepare(
-        `SELECT rt.id, rt.ref, u.name AS promoter_name,
+    for (const row of (await db.all(`SELECT rt.id, rt.ref, u.name AS promoter_name,
            SUM(ri.qty - COALESCE(ri.qty_good, 0) - COALESCE(ri.qty_damaged, 0) - COALESCE(ri.qty_laundry, 0)) AS short
          FROM returns rt JOIN return_items ri ON ri.return_id = rt.id JOIN campaigns c ON c.id = rt.campaign_id
          JOIN users u ON u.id = rt.promoter_id
          WHERE rt.status = 'received' AND rt.received_at >= ? AND ${c.sql} AND ${p.sql}
-         GROUP BY rt.id HAVING short > 0`,
-      )
-      .all(new Date(Date.now() - 30 * 864e5).toISOString(), ...c.params, ...p.params)) {
+         GROUP BY rt.id, u.name
+         HAVING SUM(ri.qty - COALESCE(ri.qty_good, 0) - COALESCE(ri.qty_damaged, 0) - COALESCE(ri.qty_laundry, 0)) > 0`, new Date(Date.now() - 30 * 864e5).toISOString(), ...c.params, ...p.params))) {
       add({
         group: 'missing',
         severity: 'high',
@@ -190,13 +167,9 @@ function buildReminders(db, user) {
   // Pending returns not yet checked in after 3 days
   if (ops || am) {
     const c = camp('c');
-    for (const row of db
-      .prepare(
-        `SELECT rt.id, rt.ref, rt.created_at, u.name AS promoter_name, w.name AS warehouse_name FROM returns rt
+    for (const row of (await db.all(`SELECT rt.id, rt.ref, rt.created_at, u.name AS promoter_name, w.name AS warehouse_name FROM returns rt
          JOIN campaigns c ON c.id = rt.campaign_id JOIN users u ON u.id = rt.promoter_id JOIN warehouses w ON w.id = rt.warehouse_id
-         WHERE rt.status = 'pending' AND rt.created_at <= datetime('now', '-3 days') AND ${c.sql}`,
-      )
-      .all(...c.params)) {
+         WHERE rt.status = 'pending' AND rt.created_at <= to_char(now() AT TIME ZONE 'UTC' - interval '3 days', 'YYYY-MM-DD HH24:MI:SS') AND ${c.sql}`, ...c.params))) {
       add({
         group: 'missing',
         severity: 'medium',
@@ -210,14 +183,10 @@ function buildReminders(db, user) {
 
   // Stock-take shortfalls in the last 30 days
   if (ops) {
-    for (const row of db
-      .prepare(
-        `SELECT p.sku, p.name, w.name AS warehouse_name, -SUM(m.qty) AS missing, MAX(m.created_at) AS at
+    for (const row of (await db.all(`SELECT p.sku, p.name, w.name AS warehouse_name, -SUM(m.qty) AS missing, MAX(m.created_at) AS at
          FROM movements m JOIN products p ON p.id = m.product_id JOIN warehouses w ON w.id = m.to_warehouse_id
-         WHERE m.type = 'adjustment' AND m.qty < 0 AND m.created_at >= datetime('now', '-30 days')
-         GROUP BY m.product_id, m.to_warehouse_id ORDER BY missing DESC LIMIT 10`,
-      )
-      .all()) {
+         WHERE m.type = 'adjustment' AND m.qty < 0 AND m.created_at >= to_char(now() AT TIME ZONE 'UTC' - interval '30 days', 'YYYY-MM-DD HH24:MI:SS')
+         GROUP BY m.product_id, m.to_warehouse_id, p.sku, p.name, w.name ORDER BY missing DESC LIMIT 10`))) {
       add({
         group: 'missing',
         severity: 'medium',
@@ -231,14 +200,10 @@ function buildReminders(db, user) {
 
   // Delivery photos: inbound deliveries in the last 14 days without a waybill photo
   if (ops) {
-    const rows = db
-      .prepare(
-        `SELECT m.reference, w.name AS warehouse_name, MIN(m.created_at) AS at FROM movements m JOIN warehouses w ON w.id = m.to_warehouse_id
-         WHERE m.type = 'receipt' AND m.created_at >= datetime('now', '-14 days')
+    const rows = (await db.all(`SELECT m.reference, w.name AS warehouse_name, MIN(m.created_at) AS at FROM movements m JOIN warehouses w ON w.id = m.to_warehouse_id
+         WHERE m.type = 'receipt' AND m.created_at >= to_char(now() AT TIME ZONE 'UTC' - interval '14 days', 'YYYY-MM-DD HH24:MI:SS')
            AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a.kind = 'receipt' AND a.reference = m.reference AND a.warehouse_id = m.to_warehouse_id)
-         GROUP BY m.reference, m.to_warehouse_id ORDER BY at DESC`,
-      )
-      .all();
+         GROUP BY m.reference, m.to_warehouse_id, w.name ORDER BY at DESC`));
     if (rows.length) {
       add({
         group: 'missing',
@@ -255,17 +220,13 @@ function buildReminders(db, user) {
   if (am || mgmt || promoter) {
     const c = camp('c');
     const p = promoterOnly('f.promoter_id');
-    for (const row of db
-      .prepare(
-        `SELECT f.promoter_id, u.name AS promoter_name, c.id AS campaign_id, c.name AS campaign_name, SUM(f.qty) AS units,
+    for (const row of (await db.all(`SELECT * FROM (SELECT f.promoter_id, u.name AS promoter_name, c.id AS campaign_id, c.name AS campaign_name, SUM(f.qty) AS units,
            (SELECT MAX(report_date) FROM usage_reports ur WHERE ur.promoter_id = f.promoter_id AND ur.campaign_id = c.id) AS last_report
          FROM field_stock f JOIN campaigns c ON c.id = f.campaign_id JOIN users u ON u.id = f.promoter_id
          JOIN products pr ON pr.id = f.product_id
          WHERE f.qty > 0 AND c.status = 'active' AND pr.category IN ('Sample','Giveaway','Merchandise') AND ${c.sql} AND ${p.sql}
-         GROUP BY f.promoter_id, c.id
-         HAVING last_report IS NULL OR last_report < ?`,
-      )
-      .all(...c.params, ...p.params, saToday(-3))) {
+         GROUP BY f.promoter_id, u.name, c.id) x
+         WHERE x.last_report IS NULL OR x.last_report < ?`, ...c.params, ...p.params, saToday(-3)))) {
       add({
         group: 'missing',
         severity: 'low',
@@ -280,14 +241,10 @@ function buildReminders(db, user) {
   // Activation reports in the last 7 days with no GPS location (phone location off or denied)
   if (am || mgmt) {
     const c = camp('c');
-    for (const row of db
-      .prepare(
-        `SELECT u.name AS promoter_name, COUNT(*) AS n FROM usage_reports ur
+    for (const row of (await db.all(`SELECT u.name AS promoter_name, COUNT(*) AS n FROM usage_reports ur
          JOIN campaigns c ON c.id = ur.campaign_id JOIN users u ON u.id = ur.promoter_id
          WHERE ur.lat IS NULL AND ur.report_date >= ? AND ${c.sql}
-         GROUP BY ur.promoter_id ORDER BY n DESC`,
-      )
-      .all(saToday(-7), ...c.params)) {
+         GROUP BY ur.promoter_id, u.name ORDER BY n DESC`, saToday(-7), ...c.params))) {
       add({
         group: 'missing',
         severity: 'low',
@@ -308,13 +265,9 @@ function buildReminders(db, user) {
     const tomorrowEnd = `${saToday(1)}T23:59`;
     const where = mgmt || ops ? '1=1' : am ? 'c.account_manager_id = ?' : '(st.lead_id = ? OR EXISTS (SELECT 1 FROM setup_crew sc WHERE sc.setup_id = st.id AND sc.user_id = ?))';
     const params = mgmt || ops ? [] : am ? [user.id] : [user.id, user.id];
-    const rows = db
-      .prepare(
-        `SELECT st.id, st.ref, st.venue, st.setup_at, st.strike_at, st.status, st.struck_at, c.name AS campaign_name
+    const rows = (await db.all(`SELECT st.id, st.ref, st.venue, st.setup_at, st.strike_at, st.status, st.struck_at, c.name AS campaign_name
          FROM setups st JOIN campaigns c ON c.id = st.campaign_id
-         WHERE st.status NOT IN ('returned','cancelled') AND ${where}`,
-      )
-      .all(...params);
+         WHERE st.status NOT IN ('returned','cancelled') AND ${where}`, ...params));
     const when = (t) => t.replace('T', ' ');
     for (const s of rows) {
       const link = `setups/${s.id}`;
@@ -344,16 +297,12 @@ function buildReminders(db, user) {
 
   // ---- BA forms ready to clear for payment ------------------------------------
   if (isStockApprover(user)) {
-    for (const row of db
-      .prepare(
-        `SELECT c.id AS campaign_id, c.name AS campaign_name, u.id AS promoter_id, u.name AS promoter_name
+    for (const row of (await db.all(`SELECT c.id AS campaign_id, c.name AS campaign_name, u.id AS promoter_id, u.name AS promoter_name
          FROM campaigns c JOIN users u ON u.id IN (SELECT promoter_id FROM movements WHERE type = 'dispatch' AND campaign_id = c.id)
          LEFT JOIN ba_clearances bc ON bc.campaign_id = c.id AND bc.promoter_id = u.id
          WHERE (c.status = 'completed' OR c.end_date < ?) AND bc.cleared_at IS NULL
            AND COALESCE((SELECT SUM(qty) FROM field_stock f WHERE f.campaign_id = c.id AND f.promoter_id = u.id), 0) = 0
-         ORDER BY c.end_date, u.name`,
-      )
-      .all(today)) {
+         ORDER BY c.end_date, u.name`, today))) {
       add({
         group: 'missing',
         severity: 'medium',
@@ -367,15 +316,11 @@ function buildReminders(db, user) {
 
   // ---- stock counts -------------------------------------------------------
   if (isStockApprover(user)) {
-    for (const row of db
-      .prepare(
-        `SELECT sc.id, sc.ref, w.name AS warehouse_name, a.name AS counter, COUNT(*) AS n
+    for (const row of (await db.all(`SELECT sc.id, sc.ref, w.name AS warehouse_name, a.name AS counter, COUNT(*) AS n
          FROM count_lines l JOIN stock_counts sc ON sc.id = l.count_id JOIN warehouses w ON w.id = sc.warehouse_id
          JOIN users a ON a.id = sc.assigned_to
          WHERE l.status = 'pending' AND (sc.assigned_to != ? OR ? = 'director')
-         GROUP BY sc.id ORDER BY sc.submitted_at`,
-      )
-      .all(user.id, role)) {
+         GROUP BY sc.id, w.name, a.name ORDER BY sc.submitted_at`, user.id, role))) {
       add({
         group: 'stock',
         severity: 'high',
@@ -387,13 +332,9 @@ function buildReminders(db, user) {
     }
   }
   if (ops) {
-    for (const row of db
-      .prepare(
-        `SELECT sc.id, sc.ref, sc.created_at, w.name AS warehouse_name, COUNT(l.id) AS n FROM stock_counts sc
+    for (const row of (await db.all(`SELECT sc.id, sc.ref, sc.created_at, w.name AS warehouse_name, COUNT(l.id) AS n FROM stock_counts sc
          JOIN warehouses w ON w.id = sc.warehouse_id JOIN count_lines l ON l.count_id = sc.id
-         WHERE sc.status = 'open' AND sc.assigned_to = ? GROUP BY sc.id ORDER BY sc.id`,
-      )
-      .all(user.id)) {
+         WHERE sc.status = 'open' AND sc.assigned_to = ? GROUP BY sc.id, w.name ORDER BY sc.id`, user.id))) {
       add({
         group: 'stock',
         severity: row.created_at <= new Date(Date.now() - 864e5).toISOString().replace('T', ' ').slice(0, 19) ? 'high' : 'medium',
@@ -405,16 +346,12 @@ function buildReminders(db, user) {
     }
   }
   if (isStockApprover(user)) {
-    for (const row of db
-      .prepare(
-        `SELECT w.name AS warehouse_name, COUNT(*) AS n FROM stock s JOIN warehouses w ON w.id = s.warehouse_id
+    for (const row of (await db.all(`SELECT w.name AS warehouse_name, COUNT(*) AS n FROM stock s JOIN warehouses w ON w.id = s.warehouse_id
          JOIN products p ON p.id = s.product_id
          WHERE s.qty > 0 AND p.active = 1 AND w.active = 1 AND NOT EXISTS (
            SELECT 1 FROM count_lines l JOIN stock_counts sc ON sc.id = l.count_id
            WHERE l.product_id = s.product_id AND sc.warehouse_id = s.warehouse_id AND sc.submitted_at >= ?)
-         GROUP BY w.id ORDER BY n DESC`,
-      )
-      .all(new Date(Date.now() - 90 * 864e5).toISOString())) {
+         GROUP BY w.id ORDER BY n DESC`, new Date(Date.now() - 90 * 864e5).toISOString()))) {
       add({
         group: 'stock',
         severity: 'low',
@@ -429,16 +366,12 @@ function buildReminders(db, user) {
   // ---- stock health -------------------------------------------------------
   if (!promoter) {
     const cs = clientScope(user);
-    for (const row of db
-      .prepare(
-        `SELECT b.product_id, b.warehouse_id, p.sku, p.name, w.name AS warehouse_name, SUM(b.qty) AS qty, MIN(b.expiry_date) AS expiry
+    for (const row of (await db.all(`SELECT b.product_id, b.warehouse_id, p.sku, p.name, w.name AS warehouse_name, SUM(b.qty) AS qty, MIN(b.expiry_date) AS expiry
          FROM stock_batches b JOIN products p ON p.id = b.product_id JOIN clients cl ON cl.id = p.client_id
          JOIN warehouses w ON w.id = b.warehouse_id
          WHERE b.qty > 0 AND b.expiry_date IS NOT NULL AND b.expiry_date <= ? AND ${cs.sql}
-         GROUP BY b.product_id, b.warehouse_id, b.expiry_date < ?
-         ORDER BY expiry`,
-      )
-      .all(saToday(30), ...cs.params, today)) {
+         GROUP BY b.product_id, b.warehouse_id, p.sku, p.name, w.name, b.expiry_date < ?
+         ORDER BY expiry`, saToday(30), ...cs.params, today))) {
       const expired = row.expiry < today;
       add({
         group: 'stock',
@@ -452,7 +385,7 @@ function buildReminders(db, user) {
       });
     }
 
-    for (const row of lowStock(db, user)) {
+    for (const row of await lowStock(db, user)) {
       add({
         group: 'stock',
         severity: row.on_hand === 0 ? 'high' : 'low',
@@ -465,7 +398,7 @@ function buildReminders(db, user) {
   }
 
   if (ops) {
-    const row = db.prepare('SELECT COALESCE(SUM(qty), 0) AS n FROM laundry_stock').get();
+    const row = (await db.get('SELECT COALESCE(SUM(qty), 0) AS n FROM laundry_stock'));
     if (row.n > 0) {
       add({
         group: 'stock',
@@ -484,7 +417,7 @@ function buildReminders(db, user) {
 
 function reminderRoutes(db) {
   const r = express.Router();
-  r.get('/', (req, res) => res.json(buildReminders(db, req.user)));
+  r.get('/', async (req, res) => res.json(await buildReminders(db, req.user)));
   return r;
 }
 

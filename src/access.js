@@ -10,13 +10,11 @@ const { HttpError, isManagement, isWarehouse } = require('./auth');
  *  - promoters: campaigns they are assigned to, and their own requests/returns/stock
  */
 
-function canSeeCampaign(db, user, campaign) {
+async function canSeeCampaign(db, user, campaign) {
   if (isManagement(user) || isWarehouse(user)) return true;
   if (user.role === 'account_manager') return campaign.account_manager_id === user.id;
   if (user.role === 'promoter') {
-    return !!db
-      .prepare('SELECT 1 FROM campaign_promoters WHERE campaign_id = ? AND promoter_id = ?')
-      .get(campaign.id, user.id);
+    return !!(await db.get('SELECT 1 FROM campaign_promoters WHERE campaign_id = ? AND promoter_id = ?', campaign.id, user.id));
   }
   return false;
 }
@@ -27,9 +25,9 @@ function canManageCampaign(user, campaign) {
   return user.role === 'account_manager' && campaign.account_manager_id === user.id;
 }
 
-function assertCampaign(db, user, campaignId, { manage = false } = {}) {
-  const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(campaignId);
-  if (!campaign || !canSeeCampaign(db, user, campaign)) throw new HttpError(404, 'Campaign not found');
+async function assertCampaign(db, user, campaignId, { manage = false } = {}) {
+  const campaign = (await db.get('SELECT * FROM campaigns WHERE id = ?', campaignId));
+  if (!campaign || !await canSeeCampaign(db, user, campaign)) throw new HttpError(404, 'Campaign not found');
   if (manage && !canManageCampaign(user, campaign)) {
     throw new HttpError(403, 'Only the account manager or management can do this for the campaign');
   }

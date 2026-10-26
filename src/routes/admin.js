@@ -20,13 +20,13 @@ function idNumber(value) {
 function authRoutes(db) {
   const r = express.Router();
 
-  r.post('/login', (req, res) => {
+  r.post('/login', async (req, res) => {
     const email = v.str(req.body.email, 'Email', { required: true });
     const password = v.str(req.body.password, 'Password', { required: true });
-    const user = db.prepare('SELECT * FROM users WHERE email = ? AND active = 1').get(email);
+    const user = (await db.get('SELECT * FROM users WHERE lower(email) = lower(?) AND active = 1', email));
     if (!user || !verifyPassword(password, user.password_hash)) throw new HttpError(401, 'Incorrect email or password');
-    db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(new Date().toISOString());
-    const token = createSession(db, user.id);
+    (await db.run('DELETE FROM sessions WHERE expires_at < ?', new Date().toISOString()));
+    const token = await createSession(db, user.id);
     res.cookie('jr_session', token, { httpOnly: true, sameSite: 'lax', maxAge: 14 * 864e5 });
     res.json({ token, user: publicUser(user) });
   });
@@ -39,20 +39,20 @@ function sessionRoutes(db) {
 
   r.get('/me', (req, res) => res.json(req.user));
 
-  r.post('/logout', (req, res) => {
-    db.prepare('DELETE FROM sessions WHERE token = ?').run(req.token);
+  r.post('/logout', async (req, res) => {
+    (await db.run('DELETE FROM sessions WHERE token = ?', req.token));
     res.clearCookie('jr_session');
     res.json({ ok: true });
   });
 
-  r.post('/password', (req, res) => {
+  r.post('/password', async (req, res) => {
     const current = v.str(req.body.current, 'Current password', { required: true });
     const next = v.str(req.body.next, 'New password', { required: true });
     if (next.length < 8) throw new HttpError(400, 'New password must be at least 8 characters');
-    const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user.id);
+    const row = (await db.get('SELECT password_hash FROM users WHERE id = ?', req.user.id));
     if (!verifyPassword(current, row.password_hash)) throw new HttpError(400, 'Current password is incorrect');
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(next), req.user.id);
-    db.prepare('DELETE FROM sessions WHERE user_id = ? AND token != ?').run(req.user.id, req.token);
+    (await db.run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(next), req.user.id));
+    (await db.run('DELETE FROM sessions WHERE user_id = ? AND token != ?', req.user.id, req.token));
     res.json({ ok: true });
   });
 
@@ -79,7 +79,7 @@ function userRoutes(db) {
   const r = express.Router();
 
   // Account managers need the promoter list to staff campaigns; warehouse needs it to see who stock goes to.
-  r.get('/', allow(MANAGEMENT, 'account_manager', WAREHOUSE), (req, res) => {
+  r.get('/', allow(MANAGEMENT, 'account_manager', WAREHOUSE), async (req, res) => {
     const where = ['1=1'];
     const params = [];
     if (req.user.role === 'warehouse_manager') where.push("u.role IN ('warehouse_manager', 'warehouse', 'promoter')");
@@ -88,33 +88,24 @@ function userRoutes(db) {
       where.push('u.role = ?');
       params.push(req.query.role);
     }
-    const rows = db
-      .prepare(
-        `SELECT ${USER_COLUMNS}, w.name AS warehouse_name FROM users u
+    const rows = (await db.all(`SELECT ${USER_COLUMNS}, w.name AS warehouse_name FROM users u
          LEFT JOIN warehouses w ON w.id = u.warehouse_id
-         WHERE ${where.join(' AND ')} ORDER BY u.active DESC, u.role, u.name`,
-      )
-      .all(...params);
+         WHERE ${where.join(' AND ')} ORDER BY u.active DESC, u.role, u.name`, ...params));
     if (req.user.role === 'account_manager') for (const row of rows) delete row.badge_code;
     // ID numbers are personal information: only management and the warehouse manager see them
     if (!USER_ADMINS.includes(req.user.role) && !isManagement(req.user)) for (const row of rows) delete row.id_number;
     res.json(rows);
   });
 
-  r.post('/', allow(USER_ADMINS), (req, res) => {
+  r.post('/', allow(USER_ADMINS), async (req, res) => {
     const b = req.body;
     assertCanManageRole(req.user, v.oneOf(b.role, 'Role', ROLES, { required: true }));
     const password = v.str(b.password, 'Password', { required: true });
     if (password.length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
     const email = v.email(b.email, 'Email', { required: true });
-    if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) throw new HttpError(409, 'That email is already in use');
-    const info = db
-      .prepare(
-        `INSERT INTO users (name, email, phone, role, region, warehouse_id, gender, uniform_size, badge_code, password_hash, id_number)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        v.str(b.name, 'Name', { required: true }),
+    if ((await db.get('SELECT 1 FROM users WHERE lower(email) = lower(?)', email))) throw new HttpError(409, 'That email is already in use');
+    const info = (await db.insert(`INSERT INTO users (name, email, phone, role, region, warehouse_id, gender, uniform_size, badge_code, password_hash, id_number)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, v.str(b.name, 'Name', { required: true }),
         email,
         v.str(b.phone, 'Phone'),
         v.oneOf(b.role, 'Role', ROLES, { required: true }),
@@ -124,14 +115,13 @@ function userRoutes(db) {
         v.str(b.uniform_size, 'Uniform size', { max: 10 }),
         newBadge(),
         hashPassword(password),
-        idNumber(b.id_number),
-      );
-    res.status(201).json(getUser(db, info.lastInsertRowid));
+        idNumber(b.id_number)));
+    res.status(201).json(await getUser(db, info));
   });
 
-  r.patch('/:id', allow(USER_ADMINS), (req, res) => {
+  r.patch('/:id', allow(USER_ADMINS), async (req, res) => {
     const id = v.int(req.params.id, 'id', { required: true });
-    const user = v.found(getUser(db, id), 'User');
+    const user = v.found(await getUser(db, id), 'User');
     const b = req.body;
     assertCanManageRole(req.user, user.role);
     const fields = {
@@ -150,12 +140,9 @@ function userRoutes(db) {
     if (id === req.user.id && (fields.active === 0 || fields.role !== user.role)) {
       throw new HttpError(400, 'You cannot deactivate or demote your own account');
     }
-    const clash = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').get(fields.email, id);
+    const clash = (await db.get('SELECT id FROM users WHERE lower(email) = lower(?) AND id != ?', fields.email, id));
     if (clash) throw new HttpError(409, 'That email is already in use');
-    db.prepare(
-      'UPDATE users SET name=?, email=?, phone=?, role=?, region=?, warehouse_id=?, gender=?, uniform_size=?, active=?, id_number=? WHERE id=?',
-    ).run(
-      fields.name,
+    (await db.run('UPDATE users SET name=?, email=?, phone=?, role=?, region=?, warehouse_id=?, gender=?, uniform_size=?, active=?, id_number=? WHERE id=?', fields.name,
       fields.email,
       fields.phone,
       fields.role,
@@ -165,44 +152,39 @@ function userRoutes(db) {
       fields.uniform_size,
       fields.active,
       fields.id_number,
-      id,
-    );
+      id));
     if (b.password) {
       if (String(b.password).length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
-      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(String(b.password)), id);
+      (await db.run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(String(b.password)), id));
     }
-    if (!fields.active || b.password) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
-    res.json(getUser(db, id));
+    if (!fields.active || b.password) (await db.run('DELETE FROM sessions WHERE user_id = ?', id));
+    res.json(await getUser(db, id));
   });
 
   // Lost or shared badge: issue a new QR code so the old one stops working
-  r.post('/:id/badge', allow(MANAGEMENT, 'warehouse_manager'), (req, res) => {
+  r.post('/:id/badge', allow(MANAGEMENT, 'warehouse_manager'), async (req, res) => {
     const id = v.int(req.params.id, 'id', { required: true });
-    const user = v.found(getUser(db, id), 'User');
+    const user = v.found(await getUser(db, id), 'User');
     if (req.user.role === 'warehouse_manager') assertCanManageRole(req.user, user.role);
-    db.prepare('UPDATE users SET badge_code = ? WHERE id = ?').run(newBadge(), id);
-    res.json(getUser(db, id));
+    (await db.run('UPDATE users SET badge_code = ? WHERE id = ?', newBadge(), id));
+    res.json(await getUser(db, id));
   });
 
   return r;
 }
 
-function getUser(db, id) {
-  return db.prepare(`SELECT ${USER_COLUMNS} FROM users u WHERE u.id = ?`).get(id);
+async function getUser(db, id) {
+  return (await db.get(`SELECT ${USER_COLUMNS} FROM users u WHERE u.id = ?`, id));
 }
 
 function warehouseRoutes(db) {
   const r = express.Router();
 
-  r.get('/', (req, res) => {
+  r.get('/', async (req, res) => {
     res.json(
-      db
-        .prepare(
-          `SELECT w.*,
+      (await db.all(`SELECT w.*,
              COALESCE((SELECT SUM(s.qty) FROM stock s WHERE s.warehouse_id = w.id), 0) AS units
-           FROM warehouses w ORDER BY w.active DESC, w.name`,
-        )
-        .all(),
+           FROM warehouses w ORDER BY w.active DESC, w.name`)),
     );
   });
 
@@ -214,18 +196,16 @@ function warehouseRoutes(db) {
     b.active === undefined ? 1 : b.active ? 1 : 0,
   ];
 
-  r.post('/', allow(MANAGEMENT), (req, res) => {
-    const info = db
-      .prepare('INSERT INTO warehouses (name, city, province, address, active) VALUES (?, ?, ?, ?, ?)')
-      .run(...fields(req.body));
-    res.status(201).json(db.prepare('SELECT * FROM warehouses WHERE id = ?').get(info.lastInsertRowid));
+  r.post('/', allow(MANAGEMENT), async (req, res) => {
+    const info = (await db.insert('INSERT INTO warehouses (name, city, province, address, active) VALUES (?, ?, ?, ?, ?)', ...await fields(req.body)));
+    res.status(201).json((await db.get('SELECT * FROM warehouses WHERE id = ?', info)));
   });
 
-  r.put('/:id', allow(MANAGEMENT), (req, res) => {
+  r.put('/:id', allow(MANAGEMENT), async (req, res) => {
     const id = v.int(req.params.id, 'id', { required: true });
-    v.found(db.prepare('SELECT 1 FROM warehouses WHERE id = ?').get(id), 'Warehouse');
-    db.prepare('UPDATE warehouses SET name=?, city=?, province=?, address=?, active=? WHERE id=?').run(...fields(req.body), id);
-    res.json(db.prepare('SELECT * FROM warehouses WHERE id = ?').get(id));
+    v.found((await db.get('SELECT 1 FROM warehouses WHERE id = ?', id)), 'Warehouse');
+    (await db.run('UPDATE warehouses SET name=?, city=?, province=?, address=?, active=? WHERE id=?', ...await fields(req.body), id));
+    res.json((await db.get('SELECT * FROM warehouses WHERE id = ?', id)));
   });
 
   return r;
@@ -234,27 +214,23 @@ function warehouseRoutes(db) {
 function clientRoutes(db) {
   const r = express.Router();
 
-  r.get('/', allow(MANAGEMENT, 'account_manager', WAREHOUSE), (req, res) => {
+  r.get('/', allow(MANAGEMENT, 'account_manager', WAREHOUSE), async (req, res) => {
     const scope = clientScope(req.user);
     res.json(
-      db
-        .prepare(
-          `SELECT cl.*, u.name AS account_manager_name,
+      (await db.all(`SELECT cl.*, u.name AS account_manager_name,
              (SELECT COUNT(*) FROM products p WHERE p.client_id = cl.id AND p.active = 1) AS product_count,
              (SELECT COUNT(*) FROM campaigns c WHERE c.client_id = cl.id AND c.status = 'active') AS active_campaigns,
              COALESCE((SELECT SUM(s.qty) FROM stock s JOIN products p ON p.id = s.product_id
                        WHERE p.client_id = cl.id), 0) AS units
            FROM clients cl LEFT JOIN users u ON u.id = cl.account_manager_id
-           WHERE ${scope.sql} ORDER BY cl.is_house DESC, cl.active DESC, cl.name`,
-        )
-        .all(...scope.params),
+           WHERE ${scope.sql} ORDER BY cl.is_house DESC, cl.active DESC, cl.name`, ...scope.params)),
     );
   });
 
-  const fields = (b) => {
+  const fields = async (b) => {
     const amId = v.int(b.account_manager_id, 'Account manager');
     if (amId) {
-      const am = db.prepare('SELECT role FROM users WHERE id = ?').get(amId);
+      const am = (await db.get('SELECT role FROM users WHERE id = ?', amId));
       if (!am || am.role !== 'account_manager') throw new HttpError(400, 'Account manager must be a user with that role');
     }
     return [
@@ -268,25 +244,19 @@ function clientRoutes(db) {
     ];
   };
 
-  r.post('/', allow(MANAGEMENT), (req, res) => {
-    const f = fields(req.body);
-    if (db.prepare('SELECT 1 FROM clients WHERE name = ?').get(f[0])) throw new HttpError(409, 'A client with that name exists');
-    const info = db
-      .prepare(
-        `INSERT INTO clients (name, contact_name, contact_email, contact_phone, account_manager_id, active, is_house)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(...f);
-    res.status(201).json(db.prepare('SELECT * FROM clients WHERE id = ?').get(info.lastInsertRowid));
+  r.post('/', allow(MANAGEMENT), async (req, res) => {
+    const f = await fields(req.body);
+    if ((await db.get('SELECT 1 FROM clients WHERE name = ?', f[0]))) throw new HttpError(409, 'A client with that name exists');
+    const info = (await db.insert(`INSERT INTO clients (name, contact_name, contact_email, contact_phone, account_manager_id, active, is_house)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`, ...f));
+    res.status(201).json((await db.get('SELECT * FROM clients WHERE id = ?', info)));
   });
 
-  r.put('/:id', allow(MANAGEMENT), (req, res) => {
+  r.put('/:id', allow(MANAGEMENT), async (req, res) => {
     const id = v.int(req.params.id, 'id', { required: true });
-    v.found(db.prepare('SELECT 1 FROM clients WHERE id = ?').get(id), 'Client');
-    db.prepare(
-      'UPDATE clients SET name=?, contact_name=?, contact_email=?, contact_phone=?, account_manager_id=?, active=?, is_house=? WHERE id=?',
-    ).run(...fields(req.body), id);
-    res.json(db.prepare('SELECT * FROM clients WHERE id = ?').get(id));
+    v.found((await db.get('SELECT 1 FROM clients WHERE id = ?', id)), 'Client');
+    (await db.run('UPDATE clients SET name=?, contact_name=?, contact_email=?, contact_phone=?, account_manager_id=?, active=?, is_house=? WHERE id=?', ...await fields(req.body), id));
+    res.json((await db.get('SELECT * FROM clients WHERE id = ?', id)));
   });
 
   return r;
